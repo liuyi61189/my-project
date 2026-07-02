@@ -31,7 +31,7 @@ services:
     volumes:
       - testhub-media:/app/media
       - testhub-logs:/app/logs
-      - testhub-kb:/app/knowledge-bases
+      - ./knowledge-base:/app/knowledge-bases
     depends_on:
       mysql:
         condition: service_healthy
@@ -61,4 +61,3 @@ volumes:
   testhub-mysql-data:
   testhub-media:
   testhub-logs:
-  testhub-kb:
