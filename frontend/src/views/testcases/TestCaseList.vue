@@ -1,0 +1,1241 @@
+<template>
+  <div class="page-container">
+    <div class="page-header">
+      <h1 class="page-title">测试用例</h1>
+      <div class="header-actions">
+        <el-button 
+          v-if="!selectAllMode && selectedTestCases.length > 0" 
+          type="danger" 
+          @click="batchDeleteTestCases"
+          :disabled="isDeleting">
+          <el-icon><Delete /></el-icon>
+          批量删除 ({{ selectedTestCases.length }})
+        </el-button>
+        <el-button 
+          v-if="selectAllMode"
+          type="danger" 
+          @click="deleteAllFiltered"
+          :disabled="isDeleting">
+          <el-icon><Delete /></el-icon>
+          删除已选 ({{ selectedTestCases.length }})
+        </el-button>
+        <el-button 
+          v-if="!selectAllMode && total > 0"
+          type="warning" 
+          plain
+          @click="handleSelectAllFiltered"
+          :loading="isSelectingAll">
+          <el-icon><Select /></el-icon>
+          全选筛选结果 ({{ total }})
+        </el-button>
+        <el-button 
+          v-if="selectAllMode"
+          type="warning" 
+          @click="handleClearSelection">
+          取消全选
+        </el-button>
+        <el-button type="success" @click="exportToExcel">
+          <el-icon><Download /></el-icon>
+          导出Excel
+        </el-button>
+        <el-button type="primary" @click="$router.push('/ai-generation/testcases/create')">
+          <el-icon><Plus /></el-icon>
+          新建用例
+        </el-button>
+      </div>
+    </div>
+    
+    <div class="card-container">
+      <div class="filter-bar">
+        <!-- Row 1: 主要筛选器 -->
+        <div class="filter-row">
+          <div class="filter-item filter-item--wide">
+            <el-input
+              v-model="searchText"
+              placeholder="搜索用例标题..."
+              clearable
+              @input="handleSearch"
+              size="default"
+            >
+              <template #prefix>
+                <el-icon><Search /></el-icon>
+              </template>
+            </el-input>
+          </div>
+          <div class="filter-item">
+            <el-select v-model="projectFilter" placeholder="关联项目" clearable @change="handleProjectFilterChange" size="default">
+              <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
+            </el-select>
+          </div>
+          <div class="filter-item">
+            <el-select v-model="priorityFilter" placeholder="优先级" clearable @change="handleFilter" size="default">
+              <el-option label="低" value="low" />
+              <el-option label="中" value="medium" />
+              <el-option label="高" value="high" />
+              <el-option label="紧急" value="critical" />
+            </el-select>
+          </div>
+          <div class="filter-item">
+            <el-select v-model="statusFilter" placeholder="状态" clearable @change="handleFilter" size="default">
+              <el-option label="草稿" value="draft" />
+              <el-option label="激活" value="active" />
+              <el-option label="废弃" value="deprecated" />
+            </el-select>
+          </div>
+          <div class="filter-item">
+            <el-select v-model="versionFilter" placeholder="关联版本" clearable :disabled="!projectFilter" @change="handleVersionFilterChange" size="default">
+              <el-option v-for="ver in projectVersions" :key="ver.id" :label="ver.name + (ver.is_baseline ? ' (基线)' : '')" :value="ver.id" />
+            </el-select>
+          </div>
+          <div class="filter-item filter-item--module">
+            <el-select v-model="featureModuleFilter" placeholder="功能模块" clearable :disabled="!projectFilter" @change="handleFeatureModuleChange" size="default" class="module-select">
+              <el-option v-for="fm in filteredFeatureModules" :key="fm.id" :label="fm.name" :value="fm.id" />
+            </el-select>
+            <el-button size="small" circle @click="openQuickCreateFeatureModule" title="快速新建功能模块" class="quick-add-btn">
+              <el-icon><Plus /></el-icon>
+            </el-button>
+          </div>
+        </div>
+        <!-- Row 2: 测试点（功能模块下级） + 操作区 -->
+        <div class="filter-row filter-row--sub">
+          <div class="cascade-arrow" v-show="featureModuleFilter">
+            <span>↳</span>
+          </div>
+          <div class="filter-item filter-item--module">
+            <el-select 
+              v-model="testPointFilter" 
+              placeholder="选择测试点" 
+              clearable 
+              :disabled="!featureModuleFilter"
+              @change="handleFilter" 
+              size="default"
+              class="module-select"
+            >
+              <el-option v-for="tp in allTestPoints" :key="tp.id" :label="tp.name" :value="tp.id" />
+            </el-select>
+            <el-button size="small" circle @click="openQuickCreateTestPoint" :disabled="!featureModuleFilter" title="快速新建测试点" class="quick-add-btn">
+              <el-icon><Plus /></el-icon>
+            </el-button>
+            <span v-if="!featureModuleFilter" class="filter-hint">← 请先选择功能模块</span>
+          </div>
+          <div class="filter-spacer"></div>
+          <div class="filter-actions">
+            <el-button text size="small" @click="resetAllFilters" :disabled="!hasActiveFilters">
+              <el-icon><RefreshLeft /></el-icon>
+              重置筛选
+            </el-button>
+          </div>
+        </div>
+      </div>
+      
+      <div class="table-wrapper">
+      <el-table
+        ref="tableRef"
+        :data="testcases"
+        v-loading="loading"
+        style="width: 100%"
+        show-overflow-tooltip
+        @selection-change="handleSelectionChange">
+        <el-table-column type="selection" width="45" :show-overflow-tooltip="false" />
+        <el-table-column type="index" label="序号" width="60" :index="getSerialNumber" :show-overflow-tooltip="false" />
+        <el-table-column prop="title" label="用例标题" min-width="200">
+          <template #default="{ row }">
+            <el-link @click="goToTestCase(row.id)" type="primary">
+              {{ row.title }}
+            </el-link>
+          </template>
+        </el-table-column>
+        <el-table-column prop="project.name" label="关联项目" min-width="90">
+          <template #default="{ row }">
+            {{ row.project?.name || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="versions" label="关联版本" min-width="110">
+          <template #default="{ row }">
+            <div v-if="row.versions && row.versions.length > 0" class="version-tags">
+              <el-tag 
+                v-for="version in row.versions.slice(0, 2)" 
+                :key="version.id" 
+                size="small" 
+                :type="version.is_baseline ? 'warning' : 'info'"
+                class="version-tag"
+              >
+                {{ version.name }}
+              </el-tag>
+              <el-tooltip v-if="row.versions.length > 2" :content="getVersionsTooltip(row.versions)">
+                <el-tag size="small" type="info" class="version-tag">
+                  +{{ row.versions.length - 2 }}
+                </el-tag>
+              </el-tooltip>
+            </div>
+            <span v-else class="no-version">未关联版本</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="feature_modules" label="功能模块" min-width="100">
+          <template #default="{ row }">
+            <div v-if="row.feature_modules && row.feature_modules.length > 0" class="version-tags">
+              <el-tag 
+                v-for="fm in row.feature_modules.slice(0, 2)" 
+                :key="fm.id" 
+                size="small" 
+                type="success"
+                class="version-tag"
+              >
+                {{ fm.name }}
+              </el-tag>
+              <el-tooltip v-if="row.feature_modules.length > 2" :content="getFeatureModulesTooltip(row.feature_modules)">
+                <el-tag size="small" type="success" class="version-tag">
+                  +{{ row.feature_modules.length - 2 }}
+                </el-tag>
+              </el-tooltip>
+            </div>
+            <span v-else class="no-version">-</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="test_point" label="测试点" min-width="90">
+          <template #default="{ row }">
+            <div v-if="row.test_point && row.test_point.name">
+              <el-tag size="small" type="warning" class="version-tag">
+                {{ row.test_point.name }}
+              </el-tag>
+            </div>
+            <span v-else class="no-version">-</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="priority" label="优先级" min-width="70">
+          <template #default="{ row }">
+            <el-tag :class="`priority-tag ${row.priority}`">{{ getPriorityText(row.priority) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="status" label="状态" min-width="70">
+          <template #default="{ row }">
+            <el-tag :type="getStatusType(row.status)">{{ getStatusText(row.status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="执行结果" min-width="80">
+          <template #default="{ row }">
+            <el-tag v-if="row.latest_execution_result === 'pass'" type="success" size="small">✅ 通过</el-tag>
+            <el-tag v-else-if="row.latest_execution_result === 'fail'" type="danger" size="small">❌ 失败</el-tag>
+            <span v-else class="no-version">未执行</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="test_type" label="测试类型" min-width="80">
+          <template #default="{ row }">
+            {{ getTypeText(row.test_type) }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="author.username" label="作者" min-width="75" />
+        <el-table-column prop="created_at" label="创建时间" min-width="130">
+          <template #default="{ row }">
+            {{ formatDate(row.created_at) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="200" fixed="right" :show-overflow-tooltip="false">
+          <template #default="{ row }">
+            <el-button size="small" type="success" @click="openExecuteDialog(row)">执行</el-button>
+            <el-button size="small" @click="editTestCase(row)">编辑</el-button>
+            <el-button size="small" type="danger" @click="deleteTestCase(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      </div>
+      
+      <div class="pagination-container">
+        <el-pagination
+          v-model:current-page="currentPage"
+          :page-size="pageSize"
+          :total="total"
+          layout="total, prev, pager, next"
+          @current-change="handlePageChange"
+        />
+      </div>
+    </div>
+
+    <!-- 快速创建功能模块弹窗 -->
+    <el-dialog v-model="showQuickCreateFeatureModule" title="⚡ 快速新建功能模块" width="450px" :close-on-click-modal="false">
+      <el-form label-width="80px">
+        <el-form-item label="模块名称" required>
+          <el-input v-model="quickFeatureModuleForm.name" placeholder="例如：用户登录、搜索功能" maxlength="100" />
+        </el-form-item>
+        <el-form-item label="关联项目" required>
+          <el-select v-model="quickFeatureModuleForm.project_id" placeholder="请选择项目" style="width:100%">
+            <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="模块描述">
+          <el-input v-model="quickFeatureModuleForm.description" type="textarea" :rows="2" placeholder="可选填模块描述" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showQuickCreateFeatureModule = false">取消</el-button>
+        <el-button type="primary" @click="saveQuickFeatureModule" :loading="quickFeatureModuleSaving" :disabled="!quickFeatureModuleForm.name.trim() || !quickFeatureModuleForm.project_id">
+          创建
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 快速创建测试点弹窗 -->
+    <el-dialog v-model="showQuickCreateTestPoint" title="⚡ 快速新建测试点" width="450px" :close-on-click-modal="false">
+      <el-form label-width="80px">
+        <el-form-item label="所属模块">
+          <el-input :model-value="currentFeatureModuleName" disabled />
+        </el-form-item>
+        <el-form-item label="测试点名称" required>
+          <el-input v-model="quickTestPointForm.name" placeholder="例如：登录验证、密码校验" maxlength="100" />
+        </el-form-item>
+        <el-form-item label="测试点描述">
+          <el-input v-model="quickTestPointForm.description" type="textarea" :rows="2" placeholder="可选填测试点描述" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showQuickCreateTestPoint = false">取消</el-button>
+        <el-button type="primary" @click="saveQuickTestPoint" :loading="quickTestPointSaving" :disabled="!quickTestPointForm.name.trim()">
+          创建
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 执行用例弹窗 -->
+    <el-dialog v-model="showExecuteDialog" title="执行测试用例" width="420px" :close-on-click-modal="false">
+      <div class="execute-info">
+        <p><strong>用例：</strong>{{ executeTarget?.title }}</p>
+        <el-form label-width="80px" style="margin-top: 16px">
+          <el-form-item label="执行结果" required>
+            <el-radio-group v-model="executeForm.result">
+              <el-radio value="pass">✅ 通过</el-radio>
+              <el-radio value="fail">❌ 失败</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="备注">
+            <el-input v-model="executeForm.notes" type="textarea" :rows="3" placeholder="可选：备注信息" />
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button @click="showExecuteDialog = false">取消</el-button>
+        <el-button type="primary" @click="confirmExecute" :loading="executing">
+          {{ executing ? '提交中...' : '确认执行' }}
+        </el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive, computed, onMounted } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, Search, Download, Delete, RefreshLeft, Select } from '@element-plus/icons-vue'
+import api from '@/utils/api'
+import dayjs from 'dayjs'
+import * as XLSX from 'xlsx'
+
+const router = useRouter()
+const route = useRoute()
+const loading = ref(false)
+const tableRef = ref(null)
+const testcases = ref([])
+const projects = ref([])
+const pageSize = ref(20)
+const total = ref(0)
+// 从 URL query 恢复筛选条件（支持返回不丢失）
+// 注意：route.query 值全是字符串，数字字段需显式转 Number，否则 el-select 无法匹配 options
+const parseNum = (v) => { const n = parseInt(v); return isNaN(n) ? '' : n }
+const currentPage = ref(parseInt(route.query.page) || 1)
+const searchText = ref(route.query.search || '')
+const projectFilter = ref(parseNum(route.query.project))
+const priorityFilter = ref(route.query.priority || '')
+const statusFilter = ref(route.query.status || '')
+const versionFilter = ref(parseNum(route.query.version))
+const featureModuleFilter = ref(parseNum(route.query.feature_module))
+const testPointFilter = ref(parseNum(route.query.test_point))
+const allVersions = ref([])
+const allFeatureModules = ref([])
+const allTestPoints = ref([])
+const selectedTestCases = ref([])
+const isDeleting = ref(false)
+const isSelectingAll = ref(false)  // 正在全选筛选结果（分页拉取中）
+const selectAllMode = ref(false)  // 全选模式：true=已全选当前筛选条件下的全部数据
+
+// 快速创建功能模块
+const showQuickCreateFeatureModule = ref(false)
+const quickFeatureModuleSaving = ref(false)
+const quickFeatureModuleForm = reactive({
+  name: '',
+  project_id: '',
+  description: ''
+})
+
+const openQuickCreateFeatureModule = () => {
+  showQuickCreateFeatureModule.value = true
+  quickFeatureModuleForm.name = ''
+  quickFeatureModuleForm.project_id = projectFilter.value || ''
+  quickFeatureModuleForm.description = ''
+}
+
+const saveQuickFeatureModule = async () => {
+  if (!quickFeatureModuleForm.name.trim()) {
+    ElMessage.warning('请输入模块名称')
+    return
+  }
+  if (!quickFeatureModuleForm.project_id) {
+    ElMessage.warning('请选择关联项目')
+    return
+  }
+  quickFeatureModuleSaving.value = true
+  try {
+    await api.post('/feature-modules/', {
+      name: quickFeatureModuleForm.name.trim(),
+      description: quickFeatureModuleForm.description.trim(),
+      project_id: quickFeatureModuleForm.project_id
+    })
+    ElMessage.success(`功能模块「${quickFeatureModuleForm.name}」创建成功`)
+    showQuickCreateFeatureModule.value = false
+    await fetchFeatureModules()
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '创建功能模块失败')
+  } finally {
+    quickFeatureModuleSaving.value = false
+  }
+}
+
+// 快速创建测试点
+const showQuickCreateTestPoint = ref(false)
+const quickTestPointSaving = ref(false)
+const quickTestPointForm = reactive({
+  name: '',
+  description: ''
+})
+
+const currentFeatureModuleName = computed(() => {
+  const fm = allFeatureModules.value.find(f => f.id === featureModuleFilter.value)
+  return fm ? fm.name : '未选择'
+})
+
+const openQuickCreateTestPoint = () => {
+  if (!featureModuleFilter.value) {
+    ElMessage.warning('请先选择功能模块')
+    return
+  }
+  showQuickCreateTestPoint.value = true
+  quickTestPointForm.name = ''
+  quickTestPointForm.description = ''
+}
+
+const saveQuickTestPoint = async () => {
+  if (!quickTestPointForm.name.trim()) {
+    ElMessage.warning('请输入测试点名称')
+    return
+  }
+  quickTestPointSaving.value = true
+  try {
+    await api.post('/feature-modules/test-points/', {
+      name: quickTestPointForm.name.trim(),
+      description: quickTestPointForm.description.trim(),
+      feature_module_id: featureModuleFilter.value
+    })
+    ElMessage.success(`测试点「${quickTestPointForm.name}」创建成功`)
+    showQuickCreateTestPoint.value = false
+    await fetchTestPoints(featureModuleFilter.value)
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '创建测试点失败')
+  } finally {
+    quickTestPointSaving.value = false
+  }
+}
+
+// =============== 执行用例 ===============
+const showExecuteDialog = ref(false)
+const executeTarget = ref(null)
+const executing = ref(false)
+const executeForm = reactive({
+  result: 'pass',
+  notes: ''
+})
+
+const openExecuteDialog = (row) => {
+  executeTarget.value = row
+  executeForm.result = 'pass'
+  executeForm.notes = ''
+  showExecuteDialog.value = true
+}
+
+const confirmExecute = async () => {
+  if (!executeForm.result) {
+    ElMessage.warning('请选择执行结果')
+    return
+  }
+  executing.value = true
+  try {
+    await api.post(`/testcases/${executeTarget.value.id}/execute/`, {
+      testcase: executeTarget.value.id,
+      result: executeForm.result,
+      notes: executeForm.notes
+    })
+    ElMessage.success(`执行完成：${executeForm.result === 'pass' ? '通过 ✅' : '失败 ❌'}`)
+    showExecuteDialog.value = false
+    await fetchTestCases()
+  } catch (error) {
+    ElMessage.error('执行失败: ' + (error.response?.data?.detail || error.message))
+  } finally {
+    executing.value = false
+  }
+}
+
+const fetchTestCases = async () => {
+  loading.value = true
+  try {
+    const params = {
+      page: currentPage.value,
+      search: searchText.value,
+      project: projectFilter.value,
+      priority: priorityFilter.value,
+      status: statusFilter.value,
+      version: versionFilter.value,
+      feature_module: featureModuleFilter.value,
+      test_point: testPointFilter.value
+    }
+    const response = await api.get('/testcases/', { params })
+    testcases.value = response.data.results || []
+    total.value = response.data.count || 0
+    // 数据更新后清除选择状态
+    selectAllMode.value = false
+    tableRef.value?.clearSelection()
+  } catch (error) {
+    ElMessage.error('获取测试用例列表失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+const handleSearch = () => {
+  currentPage.value = 1
+  syncFiltersToUrl()
+  fetchTestCases()
+}
+
+const handleFilter = () => {
+  currentPage.value = 1
+  syncFiltersToUrl()
+  fetchTestCases()
+}
+
+const handleProjectFilterChange = () => {
+  // 清空下游筛选条件
+  versionFilter.value = ''
+  featureModuleFilter.value = ''
+  testPointFilter.value = ''
+  allTestPoints.value = []
+  selectAllMode.value = false
+  currentPage.value = 1
+  syncFiltersToUrl()
+  fetchTestCases()
+}
+
+const handleFeatureModuleChange = () => {
+  // 清空测试点筛选
+  testPointFilter.value = ''
+  if (featureModuleFilter.value) {
+    fetchTestPoints(featureModuleFilter.value)
+  } else {
+    allTestPoints.value = []
+  }
+  currentPage.value = 1
+  syncFiltersToUrl()
+  fetchTestCases()
+}
+
+// 版本筛选变化时清空功能模块和测试点（模块需匹配版本的归属项目）
+const handleVersionFilterChange = () => {
+  featureModuleFilter.value = ''
+  testPointFilter.value = ''
+  allTestPoints.value = []
+  selectAllMode.value = false
+  currentPage.value = 1
+  syncFiltersToUrl()
+  fetchTestCases()
+}
+
+// 根据选中项目过滤的版本列表
+const projectVersions = computed(() => {
+  if (!projectFilter.value) {
+    return allVersions.value
+  }
+  const pid = Number(projectFilter.value)
+  return allVersions.value.filter(v => {
+    if (v.projects && Array.isArray(v.projects)) {
+      return v.projects.some(p => p.id === pid)
+    }
+    return false
+  })
+})
+
+// 根据选中版本/项目过滤的功能模块列表
+const filteredFeatureModules = computed(() => {
+  // 优先按版本的项目过滤
+  if (versionFilter.value) {
+    const version = allVersions.value.find(v => v.id === Number(versionFilter.value))
+    if (version && version.projects) {
+      const projectIds = version.projects.map(p => p.id)
+      return allFeatureModules.value.filter(fm => {
+        const pid = fm.project ? fm.project.id : fm.project_id
+        return projectIds.includes(pid)
+      })
+    }
+  }
+  // 其次按选中的项目过滤
+  if (projectFilter.value) {
+    const pid = Number(projectFilter.value)
+    return allFeatureModules.value.filter(fm => {
+      const fpid = fm.project ? fm.project.id : fm.project_id
+      return fpid === pid
+    })
+  }
+  return allFeatureModules.value
+})
+
+// 是否有激活的筛选器
+const hasActiveFilters = computed(() => {
+  return searchText.value || projectFilter.value || priorityFilter.value ||
+    statusFilter.value || versionFilter.value || featureModuleFilter.value ||
+    testPointFilter.value
+})
+
+// 重置所有筛选器
+const resetAllFilters = () => {
+  searchText.value = ''
+  projectFilter.value = ''
+  priorityFilter.value = ''
+  statusFilter.value = ''
+  versionFilter.value = ''
+  featureModuleFilter.value = ''
+  testPointFilter.value = ''
+  allTestPoints.value = []
+  selectAllMode.value = false
+  tableRef.value?.clearSelection()
+  currentPage.value = 1
+  router.replace({ query: {} })  // 清除 URL 中的筛选参数
+  fetchTestCases()
+}
+
+// 将筛选条件同步到 URL query（支持返回/刷新不丢失）
+const syncFiltersToUrl = () => {
+  const query = {}
+  if (searchText.value) query.search = searchText.value
+  if (projectFilter.value) query.project = projectFilter.value
+  if (priorityFilter.value) query.priority = priorityFilter.value
+  if (statusFilter.value) query.status = statusFilter.value
+  if (versionFilter.value) query.version = versionFilter.value
+  if (featureModuleFilter.value) query.feature_module = featureModuleFilter.value
+  if (testPointFilter.value) query.test_point = testPointFilter.value
+  if (currentPage.value > 1) query.page = String(currentPage.value)
+  router.replace({ query })
+}
+
+const fetchTestPoints = async (moduleId) => {
+  try {
+    const response = await api.get(`/feature-modules/modules/${moduleId}/test-points/`)
+    allTestPoints.value = response.data || response.data.results || []
+  } catch (error) {
+    console.error('获取测试点列表失败:', error)
+    allTestPoints.value = []
+  }
+}
+
+const handlePageChange = () => {
+  syncFiltersToUrl()
+  fetchTestCases()
+}
+
+const goToTestCase = (id) => {
+  router.push(`/ai-generation/testcases/${id}`)
+}
+
+const editTestCase = (testcase) => {
+  router.push(`/ai-generation/testcases/${testcase.id}/edit`)
+}
+
+const deleteTestCase = async (testcase) => {
+  try {
+    await ElMessageBox.confirm('确定要删除这个测试用例吗？', '警告', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    
+    await api.delete(`/testcases/${testcase.id}/`)
+    ElMessage.success('测试用例删除成功')
+    fetchTestCases()
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error('测试用例删除失败')
+    }
+  }
+}
+
+// 处理选择变化
+const handleSelectionChange = (selection) => {
+  if (selectAllMode.value) {
+    // 全选模式下：如果用户手动取消了某些勾选，退出全选模式
+    const currentPageIds = new Set(testcases.value.map(r => r.id))
+    const selectedIds = new Set(selection.map(r => r.id))
+    for (const id of currentPageIds) {
+      if (!selectedIds.has(id)) {
+        // 有行被取消勾选 → 回退为普通选择模式
+        selectAllMode.value = false
+        selectedTestCases.value = selection
+        return
+      }
+    }
+    // 当前页全部选中，保持全选模式（selectedTestCases 维持跨页快照不变）
+    return
+  }
+  selectedTestCases.value = selection
+}
+
+// 全选当前筛选条件下的全部数据（跨页拉取所有 ID）
+const handleSelectAllFiltered = async () => {
+  isSelectingAll.value = true
+  try {
+    const params = {
+      page: 1,
+      page_size: 200,  // 后端限制的单页最大条数
+      search: searchText.value,
+      project: projectFilter.value,
+      priority: priorityFilter.value,
+      status: statusFilter.value,
+      version: versionFilter.value,
+      feature_module: featureModuleFilter.value,
+      test_point: testPointFilter.value
+    }
+
+    const allIds = []
+    let hasMore = true
+
+    while (hasMore) {
+      const response = await api.get('/testcases/', { params: { ...params } })
+      const results = response.data.results || []
+      allIds.push(...results.map(r => r.id))
+      if (!response.data.next) {
+        hasMore = false
+      } else {
+        params.page = params.page + 1
+      }
+    }
+
+    // 选中当前页在表格中的行（视觉反馈）
+    const currentPageIds = new Set(testcases.value.map(r => r.id))
+    testcases.value.forEach(row => {
+      tableRef.value?.toggleRowSelection(row, true)
+    })
+
+    // 存储所有筛选结果的 ID 快照
+    selectedTestCases.value = allIds.map(id => ({ id }))
+    selectAllMode.value = true
+    ElMessage.success(`已全选筛选条件下的全部 ${allIds.length} 条用例`)
+  } catch (error) {
+    ElMessage.error('全选失败: ' + (error.message || '未知错误'))
+  } finally {
+    isSelectingAll.value = false
+  }
+}
+
+// 取消全选
+const handleClearSelection = () => {
+  selectAllMode.value = false
+  tableRef.value?.clearSelection()
+}
+
+// 删除当前全选的全部用例（selectedTestCases 已持有所有 ID）
+const deleteAllFiltered = async () => {
+  const ids = selectedTestCases.value.map(item => item.id)
+  if (ids.length === 0) {
+    ElMessage.warning('没有选中的用例')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除选中的全部 ${ids.length} 条测试用例吗？此操作不可恢复！`,
+      '⚠️ 危险操作',
+      {
+        confirmButtonText: '确定删除',
+        cancelButtonText: '取消',
+        type: 'error',
+        confirmButtonClass: 'el-button--danger'
+      }
+    )
+
+    isDeleting.value = true
+    ElMessage.info(`正在删除全部 ${ids.length} 条用例，请稍候...`)
+
+    let successCount = 0
+    let failCount = 0
+
+    for (const id of ids) {
+      try {
+        await api.delete(`/testcases/${id}/`)
+        successCount++
+      } catch (error) {
+        console.error(`删除测试用例 ${id} 失败:`, error)
+        failCount++
+      }
+    }
+
+    if (successCount > 0) {
+      ElMessage.success(`成功删除 ${successCount} 条${failCount > 0 ? `，${failCount} 条失败` : ''}`)
+    } else {
+      ElMessage.error('删除失败')
+    }
+
+    selectAllMode.value = false
+    selectedTestCases.value = []
+    tableRef.value?.clearSelection()
+    await refreshAfterDelete()
+  } catch (error) {
+    if (error !== 'cancel') {
+      console.error('批量删除失败:', error)
+      ElMessage.error('批量删除失败: ' + (error.message || '未知错误'))
+    }
+  } finally {
+    isDeleting.value = false
+  }
+}
+
+// 删除后刷新，如果当前页已空则回退到上一页
+const refreshAfterDelete = async () => {
+  await fetchTestCases()
+  if (testcases.value.length === 0 && currentPage.value > 1) {
+    currentPage.value--
+    await fetchTestCases()
+  }
+}
+
+// 获取序号
+const getSerialNumber = (index) => {
+  return (currentPage.value - 1) * pageSize.value + index + 1
+}
+
+// 批量删除
+const batchDeleteTestCases = async () => {
+  if (selectedTestCases.value.length === 0) {
+    ElMessage.warning('请先选择要删除的测试用例')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除选中的 ${selectedTestCases.value.length} 个测试用例吗？此操作不可恢复。`,
+      '警告',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+
+    isDeleting.value = true
+    let successCount = 0
+    let failCount = 0
+
+    // 逐个删除选中的测试用例
+    for (const testcase of selectedTestCases.value) {
+      try {
+        await api.delete(`/testcases/${testcase.id}/`)
+        successCount++
+      } catch (error) {
+        console.error(`删除测试用例 ${testcase.id} 失败:`, error)
+        failCount++
+      }
+    }
+
+    // 显示删除结果
+    if (successCount > 0) {
+      ElMessage.success(`成功删除 ${successCount} 个测试用例${failCount > 0 ? `，${failCount} 个失败` : ''}`)
+    } else {
+      ElMessage.error('删除失败')
+    }
+
+    // 清空选择并重新加载列表
+    selectedTestCases.value = []
+    tableRef.value?.clearSelection()
+    await refreshAfterDelete()
+
+  } catch (error) {
+    if (error !== 'cancel') {
+      console.error('批量删除失败:', error)
+      ElMessage.error('批量删除失败: ' + (error.message || '未知错误'))
+    }
+  } finally {
+    isDeleting.value = false
+  }
+}
+
+const getPriorityText = (priority) => {
+  const textMap = {
+    low: '低',
+    medium: '中',
+    high: '高',
+    critical: '紧急'
+  }
+  return textMap[priority] || priority
+}
+
+const getStatusType = (status) => {
+  const typeMap = {
+    draft: 'info',
+    active: 'success',
+    deprecated: 'warning'
+  }
+  return typeMap[status] || 'info'
+}
+
+const getStatusText = (status) => {
+  const textMap = {
+    draft: '草稿',
+    active: '激活',
+    deprecated: '废弃'
+  }
+  return textMap[status] || status
+}
+
+const getTypeText = (type) => {
+  const textMap = {
+    functional: '功能测试',
+    integration: '集成测试',
+    api: 'API测试',
+    ui: 'UI测试',
+    performance: '性能测试',
+    security: '安全测试'
+  }
+  return textMap[type] || '-'
+}
+
+const formatDate = (dateString) => {
+  return dayjs(dateString).format('YYYY-MM-DD HH:mm')
+}
+
+const getVersionsTooltip = (versions) => {
+  return versions.map(v => v.name + (v.is_baseline ? ' (基线)' : '')).join('、')
+}
+
+const getFeatureModulesTooltip = (modules) => {
+  return modules.map(m => m.name).join('、')
+}
+
+const getTestPointsTooltip = (points) => {
+  return points.map(p => p.name).join('、')
+}
+
+// 将HTML的<br>标签转换为换行符（用于Excel导出）
+const convertBrToNewline = (text) => {
+  if (!text) return ''
+  return text.replace(/<br\s*\/?>/gi, '\n')
+}
+
+const exportToExcel = async () => {
+  try {
+    loading.value = true
+    
+    // 获取所有测试用例数据（不分页）
+    const response = await api.get('/testcases/', { 
+      params: { 
+        page_size: 9999, // 获取所有数据
+        search: searchText.value,
+        project: projectFilter.value,
+        priority: priorityFilter.value,
+        status: statusFilter.value,
+        version: versionFilter.value,
+        feature_module: featureModuleFilter.value,
+        test_point: testPointFilter.value
+      } 
+    })
+    
+    const allTestCases = response.data.results || []
+    
+    if (allTestCases.length === 0) {
+      ElMessage.warning('没有测试用例数据可导出')
+      return
+    }
+    
+    // 创建工作簿
+    const workbook = XLSX.utils.book_new()
+    
+    // 准备Excel数据
+    const worksheetData = [
+      ['测试用例编号', '用例标题', '关联项目', '关联版本', '功能模块', '测试点', '前置条件', '操作步骤', '预期结果', '优先级', '状态', '测试类型', '作者', '创建时间']
+    ]
+    
+    allTestCases.forEach((testcase, index) => {
+      const versions = testcase.versions && testcase.versions.length > 0 
+        ? testcase.versions.map(v => v.name + (v.is_baseline ? '(基线)' : '')).join('、')
+        : '未关联版本'
+      
+      const featureModules = testcase.feature_modules && testcase.feature_modules.length > 0
+        ? testcase.feature_modules.map(m => m.name).join('、')
+        : '-'
+      
+      const testPoints = testcase.test_point && testcase.test_point.name
+        ? testcase.test_point.name
+        : '-'
+      
+      worksheetData.push([
+        `TC${String(index + 1).padStart(3, '0')}`,
+        testcase.title || '',
+        testcase.project?.name || '',
+        versions,
+        featureModules,
+        testPoints,
+        convertBrToNewline(testcase.preconditions || ''),
+        convertBrToNewline(testcase.steps || ''),
+        convertBrToNewline(testcase.expected_result || ''),
+        getPriorityText(testcase.priority),
+        getStatusText(testcase.status),
+        getTypeText(testcase.test_type),
+        testcase.author?.username || '',
+        formatDate(testcase.created_at)
+      ])
+    })
+    
+    // 创建工作表
+    const worksheet = XLSX.utils.aoa_to_sheet(worksheetData)
+    
+    // 设置列宽
+    const colWidths = [
+      { wch: 15 }, // 测试用例编号
+      { wch: 30 }, // 用例标题
+      { wch: 20 }, // 关联项目
+      { wch: 25 }, // 关联版本
+      { wch: 20 }, // 功能模块
+      { wch: 20 }, // 测试点
+      { wch: 30 }, // 前置条件
+      { wch: 40 }, // 操作步骤
+      { wch: 30 }, // 预期结果
+      { wch: 10 }, // 优先级
+      { wch: 10 }, // 状态
+      { wch: 15 }, // 测试类型
+      { wch: 15 }, // 作者
+      { wch: 20 }  // 创建时间
+    ]
+    worksheet['!cols'] = colWidths
+    
+    // 设置表头样式
+    for (let col = 0; col < worksheetData[0].length; col++) {
+      const cellAddress = XLSX.utils.encode_cell({ r: 0, c: col })
+      if (!worksheet[cellAddress]) continue
+      worksheet[cellAddress].s = {
+        font: { bold: true },
+        alignment: { horizontal: 'center', vertical: 'center', wrapText: true }
+      }
+    }
+    
+    // 设置其他行的样式
+    for (let row = 1; row < worksheetData.length; row++) {
+      for (let col = 0; col < worksheetData[row].length; col++) {
+        const cellAddress = XLSX.utils.encode_cell({ r: row, c: col })
+        if (worksheet[cellAddress]) {
+          worksheet[cellAddress].s = {
+            alignment: { vertical: 'top', wrapText: true }
+          }
+        }
+      }
+    }
+    
+    // 添加工作表到工作簿
+    XLSX.utils.book_append_sheet(workbook, worksheet, '测试用例')
+    
+    // 生成文件名
+    const fileName = `测试用例_${new Date().toISOString().slice(0, 10)}.xlsx`
+    
+    // 导出文件
+    XLSX.writeFile(workbook, fileName)
+    
+    ElMessage.success('测试用例导出成功')
+  } catch (error) {
+    console.error('导出测试用例失败:', error)
+    ElMessage.error('导出测试用例失败: ' + (error.message || '未知错误'))
+  } finally {
+    loading.value = false
+  }
+}
+
+const fetchProjects = async () => {
+  try {
+    const response = await api.get('/projects/')
+    projects.value = response.data.results || response.data || []
+  } catch (error) {
+    ElMessage.error('获取项目列表失败')
+  }
+}
+
+const fetchVersions = async () => {
+  try {
+    const response = await api.get('/versions/')
+    allVersions.value = response.data.results || response.data || []
+  } catch (error) {
+    console.error('获取版本列表失败:', error)
+  }
+}
+
+const fetchFeatureModules = async () => {
+  try {
+    const response = await api.get('/feature-modules/')
+    allFeatureModules.value = response.data.results || response.data || []
+  } catch (error) {
+    console.error('获取功能模块列表失败:', error)
+  }
+}
+
+onMounted(async () => {
+  fetchProjects()
+  fetchVersions()
+  // 关键：先加载功能模块列表，等 options 就位后再恢复筛选值渲染
+  await fetchFeatureModules()
+  // 如果 URL 中恢复了功能模块筛选，加载对应的测试点列表
+  if (featureModuleFilter.value) {
+    await fetchTestPoints(featureModuleFilter.value)
+  }
+  fetchTestCases()
+})
+</script>
+
+<style lang="scss" scoped>
+.table-wrapper {
+  max-width: 1400px;
+  overflow-x: auto;
+}
+
+.filter-bar {
+  margin-bottom: 20px;
+  padding: 16px 20px;
+  background: var(--el-fill-color-lighter, #f5f7fa);
+  border-radius: 8px;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  
+  & + .filter-row {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--el-border-color-light, #e4e7ed);
+  }
+}
+
+.filter-item {
+  flex: 0 0 auto;
+  min-width: 110px;
+  
+  &--wide {
+    flex: 1 1 220px;
+    min-width: 200px;
+    max-width: 340px;
+  }
+  
+  &--module {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 180px;
+    
+    .module-select {
+      flex: 1;
+      min-width: 140px;
+    }
+  }
+}
+
+.quick-add-btn {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  font-size: 14px;
+  border: 1px dashed var(--el-border-color, #dcdfe6);
+  color: var(--el-color-primary);
+  background: transparent;
+  transition: all 0.2s;
+  
+  &:hover:not(:disabled) {
+    background: var(--el-color-primary-light-9);
+    border-color: var(--el-color-primary);
+    border-style: solid;
+  }
+  
+  &:disabled {
+    border-color: var(--el-border-color-lighter, #ebeef5);
+    color: var(--el-text-color-placeholder);
+    cursor: not-allowed;
+  }
+}
+
+.cascade-arrow {
+  flex-shrink: 0;
+  width: 20px;
+  text-align: center;
+  color: var(--el-color-primary-light-3);
+  font-size: 18px;
+  font-weight: bold;
+  user-select: none;
+}
+
+.filter-hint {
+  font-size: 12px;
+  color: var(--el-text-color-placeholder, #c0c4cc);
+  white-space: nowrap;
+  margin-left: 4px;
+}
+
+.filter-spacer {
+  flex: 1;
+  min-width: 20px;
+}
+
+.filter-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pagination-container {
+  margin-top: 20px;
+  display: flex;
+  justify-content: center;
+}
+
+.header-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.priority-tag {
+  &.low { color: #67c23a; }
+  &.medium { color: #e6a23c; }
+  &.high { color: #f56c6c; }
+  &.critical { color: #f56c6c; font-weight: bold; }
+}
+
+.version-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  
+  .version-tag {
+    margin: 0;
+  }
+}
+
+.no-version {
+  color: #909399;
+  font-size: 12px;
+  font-style: italic;
+}
+
+:deep(.el-table .cell) {
+  white-space: nowrap;
+}
+</style>
