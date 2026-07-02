@@ -411,34 +411,6 @@ const generating = ref(false)
 const suggestions = ref([])
 
 
-// 将关键变量暴露到window对象，方便在控制台调试
-const exposeToWindow = () => {
-  if (typeof window !== 'undefined') {
-    window.ELEMENTS_DEBUG = {
-      treeData,
-      projects,
-      selectedElement,
-      loadElementTree,
-      treeRef: typeof treeRef !== 'undefined' ? treeRef : null,
-      expandedKeys,
-      pages,
-      $vm: { // 当前组件实例
-        treeData: treeData.value,
-        projects: projects.value,
-        pages: pages.value,
-        expandedKeys: expandedKeys.value
-      }
-    }
-    console.log('=== Vue组件调试信息已暴露 ===')
-    console.log('Window可用调试变量已设置')
-    console.log('控制台可直接访问:')
-    console.log('  window.ELEMENTS_DEBUG.treeData')
-    console.log('  window.ELEMENTS_DEBUG.projects')
-    console.log('  window.ELEMENTS_DEBUG.selectedElement')
-    console.log('==============================')
-  }
-}
-
 // 组件挂载
 onMounted(async () => {
   console.log('=== 组件挂载开始 ===')
@@ -453,13 +425,7 @@ onMounted(async () => {
     console.log('设置初始项目为:', projects.value[0].id)
     selectedProject.value = projects.value[0].id
     await onProjectChange()
-    console.log('onProjectChange完成')
   }
-
-  // 暴露调试信息
-  exposeToWindow()
-
-  console.log('=== 组件挂载完成 ===')
 })
 
 // 加载项目列表
@@ -503,12 +469,6 @@ const debugTree = () => {
       })
     }
     findElements(treeData.value, null)
-    console.log('所有元素:', allElements)
-
-    // 暴露到window
-    window.debugTreeData = debugTree
-    console.log('调试函数已挂载到 window.debugTreeData()')
-    console.log('===============================')
   }
 }
 
@@ -620,19 +580,7 @@ const loadElementTree = async () => {
     }
 
     attachElementsToPages(pageNodes)
-    console.log('最终treeData:', pageNodes)
     treeData.value = pageNodes
-
-    // 将treeData暴露到window，方便在控制台调试
-    if (typeof window !== 'undefined') {
-      window.vue_treeData = treeData.value
-      console.log('treeData已挂载到window.vue_treeData，可在控制台查看')
-      console.log('当前treeData结构:', JSON.parse(JSON.stringify(treeData.value)).map(p => ({
-        name: p.name,
-        id: p.id,
-        children: p.children?.filter(c => c.type === 'element').length || 0
-      })))
-    }
   } catch (error) {
     console.error('获取元素树失败:', error)
     treeData.value = []

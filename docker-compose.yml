@@ -5,17 +5,17 @@ services:
     container_name: testhub-mysql
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: Root@2026
-      MYSQL_DATABASE: testhub
-      MYSQL_USER: testhub
-      MYSQL_PASSWORD: Testhub@2026
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-testhub}
+      MYSQL_USER: ${MYSQL_USER:-testhub}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
       - testhub-mysql-data:/var/lib/mysql
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     networks:
       - testhub-net
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "testhub", "-pTesthub@2026"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${MYSQL_USER:-testhub}", "-p${MYSQL_PASSWORD}"]
       interval: 5s
       timeout: 10s
       retries: 15
@@ -31,7 +31,7 @@ services:
     volumes:
       - testhub-media:/app/media
       - testhub-logs:/app/logs
-      - C:/TestHub/knowledge-base:/app/knowledge-bases
+      - testhub-kb:/app/knowledge-bases
     depends_on:
       mysql:
         condition: service_healthy
@@ -61,3 +61,4 @@ volumes:
   testhub-mysql-data:
   testhub-media:
   testhub-logs:
+  testhub-kb:

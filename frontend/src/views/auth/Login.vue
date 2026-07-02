@@ -204,21 +204,12 @@ const handleLogin = async () => {
     if (valid) {
       loading.value = true
       try {
-        console.log('开始登录...')
-        const result = await userStore.login(form)
-        console.log('登录结果:', result)
-        console.log('用户store状态:', {
-          token: userStore.token,
-          user: userStore.user,
-          isAuthenticated: userStore.isAuthenticated
-        })
+        await userStore.login(form)
 
         ElMessage.success('登录成功')
-        console.log('准备跳转到 /home')
 
         // 使用replace而不是push，避免返回登录页
         await router.replace('/home')
-        console.log('跳转完成')
 
       } catch (error) {
         console.error('登录失败:', error)

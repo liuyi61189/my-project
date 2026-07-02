@@ -17,16 +17,6 @@ def get_current_user(request):
     serializer = UserSerializer(request.user)
     return Response(serializer.data)
 
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.response import Response
-from django.contrib.auth import login, logout
-
-@api_view(['GET'])
-@permission_classes([permissions.IsAuthenticated])
-def get_current_user(request):
-    serializer = UserSerializer(request.user)
-    return Response(serializer.data)
-
 @method_decorator(csrf_exempt, name='dispatch')
 class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all().order_by('username')
@@ -111,7 +101,7 @@ def profile_view(request):
 
 class UserListView(generics.ListCreateAPIView):
     queryset = User.objects.all().order_by('username')
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAdminUser]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['username', 'email', 'department', 'position']
     ordering_fields = ['username', 'email', 'date_joined']
@@ -125,4 +115,4 @@ class UserListView(generics.ListCreateAPIView):
 class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = User.objects.all().order_by('username')
     serializer_class = UserSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAdminUser]

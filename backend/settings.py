@@ -6,7 +6,7 @@ import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = config('SECRET_KEY', default='django-insecure-your-secret-key-here')
+SECRET_KEY = config('SECRET_KEY')
 
 DEBUG = config('DEBUG', default=True, cast=bool)
 
@@ -61,7 +61,6 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
-    'backend.middleware.DisableCSRFMiddleware',  # 添加CSRF禁用中间件
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -259,8 +258,8 @@ SPECTACULAR_SETTINGS = {
 }
 
 # Celery Configuration
-CELERY_BROKER_URL = config('REDIS_URL', default='redis://:1234@127.0.0.1:6379/0')
-CELERY_RESULT_BACKEND = config('REDIS_URL', default='redis://:1234@127.0.0.1:6379/0')
+CELERY_BROKER_URL = config('REDIS_URL')
+CELERY_RESULT_BACKEND = config('REDIS_URL')
 
 # Email Configuration
 EMAIL_BACKEND = 'apps.api_testing.custom_email_backend.CustomEmailBackend'
