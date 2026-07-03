@@ -241,13 +241,12 @@ else:
         'x-requested-with',
     ]
 
-# CSRF Settings
-CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+# CSRF Settings - 允许从 .env 配置
+CSRF_TRUSTED_ORIGINS = config(
+    'CSRF_TRUSTED_ORIGINS',
+    default='http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173',
+    cast=lambda v: [s.strip() for s in v.split(',')]
+)
 
 # Spectacular Settings
 SPECTACULAR_SETTINGS = {
