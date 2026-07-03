@@ -145,6 +145,20 @@
               <el-icon><Bell /></el-icon>
               <span>通知列表</span>
             </el-menu-item>
+            <el-sub-menu index="app-automation">
+              <template #title>
+                <el-icon><Iphone /></el-icon>
+                <span>App自动化</span>
+              </template>
+              <el-menu-item index="/ui-automation/app-devices">
+                <el-icon><Monitor /></el-icon>
+                <span>设备管理</span>
+              </el-menu-item>
+              <el-menu-item index="/ui-automation/app-configs">
+                <el-icon><SetUp /></el-icon>
+                <span>应用配置</span>
+              </el-menu-item>
+            </el-sub-menu>
           </template>
 
           <!-- AI 智能模式模块菜单 -->
@@ -251,7 +265,8 @@ import { ElMessage } from 'element-plus'
 import { 
   Monitor, Folder, Document, Flag, Check, Collection, VideoPlay, 
   DataAnalysis, ChatDotRound, DocumentCopy, Link, MagicStick,
-  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, User
+  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, User,
+  Iphone, SetUp
 } from '@element-plus/icons-vue'
 
 const router = useRouter()
@@ -317,6 +332,10 @@ const breadcrumbTitle = computed(() => {
     '/ui-automation/reports': '测试报告',
     '/ui-automation/scheduled-tasks': '定时任务',
     '/ui-automation/notification-logs': '通知列表',
+    
+    // App自动化
+    '/ui-automation/app-devices': '设备管理',
+    '/ui-automation/app-configs': '应用配置',
     
     // AI 智能模式
     '/ai-intelligent-mode/testing': 'AI 智能测试',

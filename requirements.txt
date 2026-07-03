@@ -69,6 +69,7 @@ playwright>=1.40.0
 selenium==4.15.2
 webdriver-manager==4.0.1
 browser-use==0.10.1
+Appium-Python-Client>=4.0.0
 
 # JWT 安全机制
 djangorestframework-simplejwt==5.5.1

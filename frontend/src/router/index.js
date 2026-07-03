@@ -277,6 +277,16 @@ const routes = [
         path: 'notification-logs',
         name: 'UiNotificationLogs',
         component: () => import('@/views/ui-automation/notification/NotificationLogs.vue')
+      },
+      {
+        path: 'app-devices',
+        name: 'AppDevices',
+        component: () => import('@/views/ui-automation/app/AppDeviceList.vue')
+      },
+      {
+        path: 'app-configs',
+        name: 'AppConfigs',
+        component: () => import('@/views/ui-automation/app/AppConfigList.vue')
       }
     ]
   },

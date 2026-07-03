@@ -1,5 +1,5 @@
 from rest_framework import viewsets, status
-from rest_framework.decorators import action, api_view
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.contrib.auth import get_user_model
@@ -23,7 +23,8 @@ from .models import (
     TestCase, TestCaseStep, TestCaseExecution, OperationRecord,
     TestCase, TestCaseStep, TestCaseExecution, OperationRecord,
     UiScheduledTask, UiNotificationLog, UiTaskNotificationSetting,
-    AICase, AIExecutionRecord
+    AICase, AIExecutionRecord,
+    AppDevice, AppConfig
 )
 from .serializers import (
     UiProjectSerializer, UiProjectCreateSerializer, UiProjectUpdateSerializer,
@@ -41,12 +42,39 @@ from .serializers import (
     TestCaseSerializer, TestCaseStepSerializer, TestCaseExecutionSerializer, TestCaseRunSerializer,
     OperationRecordSerializer,
     UiScheduledTaskSerializer, UiNotificationLogSerializer, UiTaskNotificationSettingSerializer,
-    AICaseSerializer, AIExecutionRecordSerializer
+    AICaseSerializer, AIExecutionRecordSerializer,
+    AppDeviceSerializer, AppConfigSerializer
 )
 from .operation_logger import log_operation
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
+
+
+def infer_appium_action_type(text):
+    """根据步骤文字推断 Appium 操作类型（click/fill/assert/wait/screenshot）"""
+    t = (text or '').lower()
+    if any(k in t for k in ['输入', '填写', '录入', 'input']):
+        return 'fill'
+    if any(k in t for k in ['点击', '单击', '按下', '选择', 'click', 'tap', '点']):
+        return 'click'
+    if any(k in t for k in ['验证', '断言', '检查', '确认', '应该', '预期', 'assert', '校验']):
+        return 'assert'
+    if any(k in t for k in ['等待', 'wait', 'sleep']):
+        return 'wait'
+    if any(k in t for k in ['截图', 'screenshot']):
+        return 'screenshot'
+    return 'click'
+
+
+def extract_step_input_value(text):
+    """从步骤文字中提取输入值（冒号/引号后的内容）"""
+    if not text:
+        return ''
+    m = re.search(r'[：:]\s*["\']?(.+?)["\']?$', text.strip())
+    if m:
+        return m.group(1).strip()
+    return ''
 
 
 def extract_step_info(s, step_index):
@@ -753,6 +781,14 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
         engine = request.data.get('engine', 'playwright')
         browser = request.data.get('browser', 'chrome')
         headless = request.data.get('headless', False)
+        device_id = request.data.get('device_id', None)
+        app_config_id = request.data.get('app_config_id', None)
+
+        # Appium 引擎必须指定设备和应用
+        if engine == 'appium' and (not device_id or not app_config_id):
+            return Response({
+                'error': '使用 Appium 引擎时必须选择设备和应用配置'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         # 更新套件执行状态为运行中
         test_suite.execution_status = 'running'
@@ -769,7 +805,9 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
                     engine=engine,
                     browser=browser,
                     headless=headless,
-                    executed_by=request.user
+                    executed_by=request.user,
+                    device_id=device_id,
+                    app_config_id=app_config_id
                 )
                 executor.run()
 
@@ -781,14 +819,19 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
             # 记录运行操作
             log_operation('run', 'suite', test_suite.id, test_suite.name, request.user)
 
-            return Response({
+            response_data = {
                 'message': '测试套件开始执行',
                 'suite_id': test_suite.id,
                 'test_case_count': test_case_count,
                 'engine': engine,
                 'browser': browser,
                 'headless': headless
-            }, status=status.HTTP_200_OK)
+            }
+            if device_id:
+                response_data['device_id'] = device_id
+            if app_config_id:
+                response_data['app_config_id'] = app_config_id
+            return Response(response_data, status=status.HTTP_200_OK)
         except Exception as e:
             test_suite.execution_status = 'failed'
             test_suite.save()
@@ -1229,6 +1272,129 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             # 返回一个简单的错误占位符
             return None
 
+    @action(detail=False, methods=['post'], url_path='convert-from-testcases')
+    def convert_from_testcases(self, request):
+        """将用例库（apps.testcases.TestCase）用例转换为 UI 自动化结构化用例（用于 Appium App 自动化）。
+        自动拆步骤骨架，交互步骤生成占位 Element（locator_value 留 'TODO_待补充控件定位器'），
+        用户后续在「UI自动化测试→元素管理」回填控件定位器即可用 Appium 引擎执行。
+        """
+        from apps.testcases.models import TestCase as LibTestCase
+
+        case_ids = request.data.get('case_ids', [])
+        ui_project_id = request.data.get('ui_project_id')
+
+        if not case_ids:
+            return Response({'success': False, 'message': '请选择要转换的用例'}, status=status.HTTP_400_BAD_REQUEST)
+        if not ui_project_id:
+            return Response({'success': False, 'message': '请选择目标 UI 自动化项目'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            ui_project = UiProject.objects.get(id=ui_project_id)
+        except UiProject.DoesNotExist:
+            return Response({'success': False, 'message': '目标 UI 自动化项目不存在'}, status=status.HTTP_400_BAD_REQUEST)
+
+        default_strategy = LocatorStrategy.objects.filter(name='xpath').first() or LocatorStrategy.objects.first()
+        if not default_strategy:
+            return Response(
+                {'success': False, 'message': '定位策略未初始化，请先在「UI自动化测试→元素管理」初始化定位策略'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        priority_map = {'critical': 'high', 'high': 'high', 'medium': 'medium', 'low': 'low'}
+
+        created = []
+        for cid in case_ids:
+            try:
+                src = LibTestCase.objects.get(id=cid)
+            except LibTestCase.DoesNotExist:
+                continue
+
+            # 同项目同名用例跳过，避免重复转换
+            if TestCase.objects.filter(project=ui_project, name=src.title).exists():
+                continue
+
+            desc_parts = []
+            if src.preconditions:
+                desc_parts.append(f"前置条件：{src.preconditions}")
+            if src.expected_result:
+                desc_parts.append(f"预期结果：{src.expected_result}")
+            if src.description:
+                desc_parts.append(src.description)
+
+            ui_case = TestCase.objects.create(
+                name=src.title,
+                description="\n".join(desc_parts),
+                project=ui_project,
+                priority=priority_map.get(src.priority, 'medium'),
+                status='draft',
+                created_by=request.user
+            )
+
+            # 收集步骤：优先用结构化 step_details，否则解析 steps 文本
+            step_objs = list(src.step_details.all().order_by('step_number'))
+            if not step_objs and src.steps:
+                step_objs = [
+                    type('S', (), {'action': line.strip(), 'expected': '', 'step_number': i + 1})()
+                    for i, line in enumerate(l for l in src.steps.splitlines() if l.strip())
+                ]
+
+            step_num = 1
+            for s in step_objs:
+                action_text = getattr(s, 'action', '') or ''
+                expected_text = getattr(s, 'expected', '') or ''
+                atype = infer_appium_action_type(action_text)
+
+                elem = Element.objects.create(
+                    project=ui_project,
+                    name=(action_text[:50] or f'步骤{step_num}')[:50],
+                    locator_strategy=default_strategy,
+                    locator_value='TODO_待补充控件定位器',
+                    element_type=('INPUT' if atype in ('fill', 'input') else 'TEXT' if atype == 'assert' else 'BUTTON'),
+                    description=action_text
+                )
+                TestCaseStep.objects.create(
+                    test_case=ui_case,
+                    step_number=step_num,
+                    action_type=atype,
+                    element=elem,
+                    input_value=extract_step_input_value(action_text),
+                    wait_time=1000,
+                    assert_type='exists' if atype == 'assert' else '',
+                    assert_value=expected_text if atype == 'assert' else '',
+                    description=action_text
+                )
+                step_num += 1
+
+            # 用例级预期结果追加为断言步骤
+            if src.expected_result:
+                elem = Element.objects.create(
+                    project=ui_project,
+                    name=f'断言_{src.title[:30]}'[:50],
+                    locator_strategy=default_strategy,
+                    locator_value='TODO_待补充控件定位器',
+                    element_type='TEXT',
+                    description='用例预期结果断言'
+                )
+                TestCaseStep.objects.create(
+                    test_case=ui_case,
+                    step_number=step_num,
+                    action_type='assert',
+                    element=elem,
+                    assert_type='textContains',
+                    assert_value=src.expected_result[:200],
+                    description=f'断言预期结果：{src.expected_result[:100]}'
+                )
+
+            log_operation('create', 'test_case', ui_case.id, ui_case.name, request.user)
+            created.append({'id': ui_case.id, 'name': ui_case.name})
+
+        return Response({
+            'success': True,
+            'count': len(created),
+            'created': created,
+            'message': f'成功转换 {len(created)} 条用例到项目「{ui_project.name}」。请到「UI自动化测试→用例管理」为占位元素回填控件定位器，再选 Appium 引擎执行。'
+        })
+
     @action(detail=True, methods=['post'])
     def run(self, request, pk=None):
         """运行单个测试用例 - 支持选择Playwright或Selenium执行引擎"""
@@ -1281,6 +1447,160 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                             'description': '执行前浏览器环境检查'
                         }]
                     }, status=status.HTTP_400_BAD_REQUEST)
+            elif engine_type == 'appium':
+                # Appium 引擎：使用 Appium 执行 App 自动化测试
+                from .appium_engine import AppiumTestEngine
+                import threading as thread_mod
+
+                device_id = request.data.get('device_id')
+                app_config_id = request.data.get('app_config_id')
+
+                if not device_id or not app_config_id:
+                    execution.status = 'failed'
+                    execution.error_message = '使用 Appium 引擎时必须选择设备和应用配置'
+                    execution.execution_logs = '使用 Appium 引擎时必须选择设备和应用配置'
+                    execution.finished_at = timezone.now()
+                    execution.save()
+                    return Response({
+                        'success': False,
+                        'logs': execution.execution_logs,
+                        'screenshots': [],
+                        'execution_time': 0,
+                        'errors': [{
+                            'message': '缺少必要参数',
+                            'details': '使用 Appium 引擎时必须选择设备和应用配置',
+                            'step_number': None,
+                            'action_type': '参数检查',
+                            'element': '',
+                            'description': '执行前参数检查'
+                        }]
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                # 加载设备和应用配置
+                try:
+                    device = AppDevice.objects.get(id=device_id)
+                    app_config = AppConfig.objects.get(id=app_config_id)
+                except AppDevice.DoesNotExist:
+                    execution.status = 'failed'
+                    execution.error_message = f'设备不存在 (ID: {device_id})'
+                    execution.finished_at = timezone.now()
+                    execution.save()
+                    return Response({'success': False, 'logs': execution.error_message}, status=status.HTTP_400_BAD_REQUEST)
+                except AppConfig.DoesNotExist:
+                    execution.status = 'failed'
+                    execution.error_message = f'应用配置不存在 (ID: {app_config_id})'
+                    execution.finished_at = timezone.now()
+                    execution.save()
+                    return Response({'success': False, 'logs': execution.error_message}, status=status.HTTP_400_BAD_REQUEST)
+
+                # 异步执行 Appium 测试
+                def run_appium_test():
+                    try:
+                        engine_config = {
+                            'appium_server_url': device.appium_server_url,
+                            'platform': device.platform,
+                            'device_udid': device.udid,
+                            'app_package': app_config.package_name,
+                            'app_activity': app_config.app_activity,
+                            'bundle_id': app_config.package_name if device.platform == 'ios' else None,
+                            'app_path': app_config.app_path or None,
+                        }
+                        if device.capabilities:
+                            engine_config.update(device.capabilities)
+
+                        app_engine = AppiumTestEngine(**engine_config)
+                        app_engine.connect()
+
+                        execution_logs.append(f"========== Appium 引擎初始化 ==========")
+                        execution_logs.append(f"✓ Appium 连接成功: {device.platform} 设备 {device.name}")
+                        execution_logs.append(f"  应用: {app_config.name}")
+                        execution_logs.append(f"  Server: {device.appium_server_url}")
+                        execution_logs.append("")
+
+                        if steps_data:
+                            execution_logs.append("========== 执行测试步骤 ==========")
+                            execution_logs.append(f"共有 {len(steps_data)} 个步骤需要执行")
+                            execution_logs.append("")
+
+                            for i, step_info in enumerate(steps_data, 1):
+                                execution_logs.append(f"--- 步骤 {i}/{len(steps_data)} ---")
+                                execution_logs.append(f"操作: {step_info['action_type']} - {step_info['description']}")
+
+                                step_data = {
+                                    'step_number': i,
+                                    'action_type': step_info['action_type'],
+                                    'description': step_info['description'],
+                                    'input_value': step_info.get('input_value', ''),
+                                    'wait_time': step_info.get('wait_time', 0),
+                                    'assert_type': step_info.get('assert_type', ''),
+                                    'assert_value': step_info.get('assert_value', ''),
+                                    'element': step_info.get('element_data')
+                                }
+
+                                result = app_engine.execute_step(step_data)
+                                step_result_entry = {
+                                    'step_number': i,
+                                    'action_type': step_info['action_type'],
+                                    'description': step_info['description'],
+                                    'success': result.get('success', False),
+                                    'error': result.get('error', ''),
+                                    'screenshot': result.get('screenshot', None)
+                                }
+                                step_results.append(step_result_entry)
+
+                                if result.get('success'):
+                                    execution_logs.append(f"  ✓ 步骤 {i} 执行成功")
+                                else:
+                                    execution_logs.append(f"  ✗ 步骤 {i} 执行失败: {result.get('error', '')}")
+                                    if result.get('screenshot'):
+                                        screenshots.append(result['screenshot'])
+                                    execution_result['status'] = 'failed'
+                                    detailed_errors.append({
+                                        'step_number': i,
+                                        'action_type': step_info['action_type'],
+                                        'element': step_info['element_data']['name'] if step_info.get('element_data') else '',
+                                        'message': f'步骤 {i} 执行失败',
+                                        'details': result.get('error', ''),
+                                        'description': step_info['description']
+                                    })
+                                    break
+
+                                execution_logs.append("")
+
+                        app_engine.disconnect()
+                        execution_logs.append("========== 测试执行完成 ==========")
+
+                        # 更新执行记录
+                        execution.execution_logs = '\n'.join(execution_logs)
+                        execution.screenshots = screenshots
+                        execution.step_results = step_results
+                        execution.status = execution_result['status']
+                        execution.error_message = execution_result.get('error_message', '')
+                        execution.finished_at = timezone.now()
+                        execution.save()
+
+                    except Exception as e:
+                        error_msg = f"Appium 执行异常: {str(e)}"
+                        execution_logs.append(f"✗ {error_msg}")
+                        execution.execution_logs = '\n'.join(execution_logs)
+                        execution.status = 'failed'
+                        execution.error_message = error_msg
+                        execution.finished_at = timezone.now()
+                        execution.save()
+
+                # 启动后台线程
+                thread = thread_mod.Thread(target=run_appium_test)
+                thread.daemon = True
+                thread.start()
+
+                return Response({
+                    'success': True,
+                    'message': 'App 自动化测试已启动',
+                    'execution_id': execution.id,
+                    'engine': 'appium',
+                    'device': device.name,
+                    'app_config': app_config.name
+                })
             else:
                 import asyncio
                 import threading
@@ -1520,7 +1840,9 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                             return True
                         else:
                             execution_logs.append("警告: 测试用例没有定义任何步骤")
-                            return True
+                            execution_result['status'] = 'failed'
+                            execution_result['error_message'] = "测试用例没有定义任何步骤，无法执行"
+                            return False
 
                     finally:
                         execution_logs.append("")
@@ -1722,7 +2044,9 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
                             else:
                                 execution_logs.append("警告: 测试用例没有定义任何步骤")
-                                return True
+                                execution_result['status'] = 'failed'
+                                execution_result['error_message'] = "测试用例没有定义任何步骤，无法执行"
+                                return False
 
                         finally:
                             # 关闭浏览器
@@ -2828,6 +3152,216 @@ class AICaseViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         instance = serializer.save()
 
+    @action(detail=False, methods=['post'], url_path='import-from-generated')
+    def import_from_generated(self, request):
+        """将AI生成的测试用例（需求分析模块的 TestCaseGenerationTask）批量转换为UI自动化AI用例(AICase)，转换后可直接执行"""
+        from apps.requirement_analysis.models import TestCaseGenerationTask
+
+        task_id = request.data.get('task_id')
+        if not task_id:
+            return Response({'error': '缺少 task_id 参数'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            task = TestCaseGenerationTask.objects.get(task_id=task_id)
+        except TestCaseGenerationTask.DoesNotExist:
+            return Response({'error': '未找到对应的生成任务'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not task.final_test_cases:
+            return Response({'error': '该任务没有最终生成的测试用例'}, status=status.HTTP_404_NOT_FOUND)
+
+        # 支持只转换前端勾选的指定用例；未指定 cases 时转换全部
+        selected_cases = request.data.get('cases')
+        if selected_cases is not None:
+            if not isinstance(selected_cases, list) or len(selected_cases) == 0:
+                return Response({'error': 'cases 为空，请至少选择一条用例'}, status=status.HTTP_400_BAD_REQUEST)
+            test_cases = selected_cases
+        else:
+            test_cases = self._parse_generation_task_cases(task.final_test_cases)
+            if not test_cases:
+                # 解析失败时，将整个内容作为一个 AICase 导入
+                ai_case = AICase.objects.create(
+                    name=task.title or f'AI生成用例-{task.task_id}',
+                    description=f'由AI生成任务导入（{task.task_id}），原始文本模式',
+                    task_description=f"任务标题：{task.title or '未命名'}\n\n{task.final_test_cases}",
+                    created_by=request.user
+                )
+                return Response({
+                    'message': '已将全部测试用例内容导入为1条UI自动化AI用例（因无法自动拆分，整段文本作为任务描述）',
+                    'created_ids': [ai_case.id],
+                    'count': 1,
+                    'mode': 'raw'
+                }, status=status.HTTP_201_CREATED)
+
+        created_ids = []
+        for idx, case in enumerate(test_cases):
+            scenario = case.get('scenario', case.get('title', f'用例{idx+1}'))
+            precondition = case.get('precondition', '')
+            steps = case.get('steps', case.get('test_steps', ''))
+            expected = case.get('expected', case.get('expected_result', ''))
+            priority = case.get('priority', '')
+
+            task_description = (
+                f"任务目标：{scenario}\n"
+                f"前置条件：{precondition or '无'}\n"
+                f"测试步骤：\n{steps or '无'}\n"
+                f"预期结果：{expected or '无'}"
+            )
+            case_id = case.get('caseId', str(idx + 1))
+            description = f'由AI生成任务导入（{task.task_id}/{case_id}）'
+            if priority:
+                description += f'，优先级 {priority}'
+
+            ai_case = AICase.objects.create(
+                name=scenario,
+                description=description,
+                task_description=task_description,
+                created_by=request.user
+            )
+            created_ids.append(ai_case.id)
+
+        return Response({
+            'message': f'成功导入 {len(created_ids)} 条AI生成用例为UI自动化AI用例',
+            'created_ids': created_ids,
+            'count': len(created_ids)
+        }, status=status.HTTP_201_CREATED)
+
+    @staticmethod
+    def _parse_generation_task_cases(content):
+        """解析 TestCaseGenerationTask.final_test_cases 文本，返回用例列表"""
+        import re
+        if not content or not content.strip():
+            return []
+
+        clean = re.sub(r'\*\*([^*]+)\*\*', r'\1', content)
+        cases = []
+
+        # 表格格式
+        if '|' in clean:
+            lines = [l.strip() for l in clean.split('\n') if l.strip() and '|' in l]
+            rows = []
+            for line in lines:
+                cells = [c.strip() for c in line.split('|')]
+                while cells and cells[0] == '':
+                    cells = cells[1:]
+                while cells and cells[-1] == '':
+                    cells.pop()
+                if len(cells) > 1:
+                    rows.append(cells)
+            if len(rows) >= 2:
+                headers = [h.lower() for h in rows[0]]
+                for row in rows[1:]:
+                    tc = {}
+                    for i, h in enumerate(headers):
+                        v = row[i] if i < len(row) else ''
+                        if any(k in h for k in ['编号','id','序号']):
+                            tc['caseId'] = v
+                        elif any(k in h for k in ['场景','标题','名称','title','目标']):
+                            tc['scenario'] = v
+                        elif any(k in h for k in ['前置','前提','precondition']):
+                            tc['precondition'] = v
+                        elif any(k in h for k in ['步骤','step']):
+                            tc['steps'] = v
+                        elif any(k in h for k in ['预期','结果','expected','result']):
+                            tc['expected'] = v
+                        elif 'priority' in h or '优先级' in h:
+                            tc['priority'] = v
+                    if tc.get('scenario') or tc.get('steps'):
+                        cases.append(tc)
+                return cases
+
+        # 文本格式
+        lines = clean.split('\n')
+        current = None
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            is_start = (
+                '测试用例' in line or 'Test Case' in line
+                or bool(re.match(r'^\d+[\.\)、]', line))
+                or line.startswith(('一、','二、','三、','四、','五、'))
+            )
+            if is_start:
+                if current:
+                    cases.append(current)
+                title = re.sub(r'^\d+[\.\)、]\s*', '', line.replace('测试用例','').replace('Test Case','').replace(':','').replace('：','').strip())
+                current = {'scenario': title}
+            elif current:
+                for keywords, key in [(['前置条件','前提条件','前置','前提'],'precondition'),
+                                      (['测试步骤','操作步骤','执行步骤','步骤'],'steps'),
+                                      (['预期结果','期望结果','预期'],'expected'),
+                                      (['优先级'],'priority')]:
+                    if any(kw in line for kw in keywords):
+                        for sep in [':','：','】']:
+                            if sep in line:
+                                current[key] = line.split(sep, 1)[-1].strip()
+                                break
+                        else:
+                            for pfx in keywords:
+                                if line.startswith(pfx):
+                                    current[key] = line[len(pfx):].strip()
+                                    break
+        if current:
+            cases.append(current)
+        return cases
+
+    @action(detail=False, methods=['post'], url_path='import-from-testcases')
+    def import_from_testcases(self, request):
+        """将用例库（apps.testcases.TestCase）中的用例批量转为UI自动化AI用例(AICase)，转换后可直接执行"""
+        from apps.testcases.models import TestCase
+
+        case_ids = request.data.get('case_ids')
+        if not case_ids or not isinstance(case_ids, list) or len(case_ids) == 0:
+            return Response({'error': '请提供 case_ids 列表'}, status=status.HTTP_400_BAD_REQUEST)
+
+        testcases_qs = TestCase.objects.filter(id__in=case_ids)
+        if not testcases_qs.exists():
+            return Response({'error': '未找到对应的用例库用例'}, status=status.HTTP_404_NOT_FOUND)
+
+        created_ids = []
+        for case in testcases_qs:
+            # 拼接步骤：优先用步骤明细，其次用 steps 文本
+            steps_text = (case.steps or '').strip()
+            if case.step_details.exists():
+                detail_lines = []
+                for s in case.step_details.all().order_by('step_number'):
+                    line = f"{s.step_number}. {s.action or ''}"
+                    if s.expected:
+                        line += f" → 预期：{s.expected}"
+                    detail_lines.append(line)
+                if detail_lines:
+                    steps_text = '\n'.join(detail_lines)
+            if not steps_text:
+                steps_text = '参考测试目标执行相应操作'
+
+            task_description = (
+                f"任务目标：{case.title}\n"
+                f"前置条件：{case.preconditions or '无'}\n"
+                f"测试步骤：\n{steps_text}\n"
+                f"预期结果：{case.expected_result or '无'}"
+            )
+            priority_text = dict(TestCase.PRIORITY_CHOICES).get(case.priority, case.priority)
+            description = f"由用例库导入（用例ID {case.id}）"
+            if priority_text:
+                description += f"，优先级 {priority_text}"
+            if case.test_type:
+                type_map = dict(TestCase.TYPE_CHOICES)
+                description += f"，测试类型 {type_map.get(case.test_type, case.test_type)}"
+
+            ai_case = AICase.objects.create(
+                name=case.title,
+                description=description,
+                task_description=task_description,
+                created_by=request.user
+            )
+            created_ids.append(ai_case.id)
+
+        return Response({
+            'message': f'成功导入 {len(created_ids)} 条用例库用例为UI自动化AI用例',
+            'created_ids': created_ids,
+            'count': len(created_ids)
+        }, status=status.HTTP_201_CREATED)
+
     def perform_destroy(self, instance):
         instance.delete()
 
@@ -3472,5 +4006,144 @@ class UiDashboardViewSet(viewsets.ViewSet):
             'suite_count': suite_test_case_count,
             'execution_count': total_execution_count
         })
+
+
+# ==================== App 自动化 ViewSet ====================
+
+class AppDeviceViewSet(viewsets.ModelViewSet):
+    """移动设备管理"""
+    queryset = AppDevice.objects.all()
+    serializer_class = AppDeviceSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['platform', 'device_type', 'status']
+    search_fields = ['name', 'udid']
+    ordering = ['platform', 'name']
+
+    @action(detail=True, methods=['post'])
+    def heartbeat(self, request, pk=None):
+        """设备心跳上报"""
+        device = self.get_object()
+        device.last_heartbeat = timezone.now()
+        if device.status == 'offline':
+            device.status = 'online'
+        device.save()
+        return Response({'status': 'ok', 'last_heartbeat': device.last_heartbeat})
+
+    @action(detail=True, methods=['post'])
+    def set_status(self, request, pk=None):
+        """手动设置设备状态"""
+        device = self.get_object()
+        new_status = request.data.get('status')
+        if new_status not in dict(AppDevice.STATUS_CHOICES):
+            return Response({'error': '无效的状态值'}, status=status.HTTP_400_BAD_REQUEST)
+        device.status = new_status
+        device.save()
+        return Response(AppDeviceSerializer(device).data)
+
+
+class AppConfigViewSet(viewsets.ModelViewSet):
+    """应用配置管理"""
+    queryset = AppConfig.objects.all()
+    serializer_class = AppConfigSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['platform', 'project', 'ai_project']
+    search_fields = ['name', 'package_name']
+    ordering = ['platform', 'name']
+
+    def get_queryset(self):
+        """支持按 project 参数筛选（同时匹配 project 和 ai_project）"""
+        qs = super().get_queryset()
+        project_param = self.request.query_params.get('project')
+        if project_param:
+            # project 参数可能是 "ui_xxx" 或 "proj_xxx" 格式
+            if project_param.startswith('ui_'):
+                qs = qs.filter(project_id=project_param[3:])
+            elif project_param.startswith('proj_'):
+                qs = qs.filter(ai_project_id=project_param[6:])
+            else:
+                # 兼容纯数字（旧的 UiProject id）
+                qs = qs.filter(project_id=project_param)
+        return qs
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_all_projects_unified(request):
+    """
+    获取合并后的项目列表（UI自动化项目 + AI用例模块项目）
+    用于 UI 自动化模块中所有项目下拉选择框
+    返回格式：[{id: "ui_1", name: "xxx", source: "ui"}, {id: "proj_1", name: "yyy", source: "proj"}]
+    """
+    from apps.projects.models import Project
+
+    result = []
+
+    # 加载 UI自动化项目
+    ui_projects = UiProject.objects.all().values('id', 'name')
+    for p in ui_projects:
+        result.append({
+            'id': f'ui_{p["id"]}',
+            'name': p['name'],
+            'source': 'ui',
+            'real_id': p['id']
+        })
+
+    # 加载 AI用例模块项目
+    ai_projects = Project.objects.all().values('id', 'name')
+    for p in ai_projects:
+        result.append({
+            'id': f'proj_{p["id"]}',
+            'name': p['name'],
+            'source': 'proj',
+            'real_id': p['id']
+        })
+
+    return Response(result)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def ensure_ui_project(request):
+    """
+    确保 AI项目有对应的 UiProject
+    传入 {ai_project_id: xxx}，返回对应的 UiProject ID
+    如果不存在则自动创建
+    """
+    from apps.projects.models import Project
+
+    ai_project_id = request.data.get('ai_project_id')
+    if not ai_project_id:
+        return Response({'error': 'ai_project_id is required'}, status=400)
+
+    try:
+        ai_project = Project.objects.get(id=ai_project_id)
+    except Project.DoesNotExist:
+        return Response({'error': 'AI project not found'}, status=404)
+
+    # 查找是否已有同名 UiProject
+    ui_project = UiProject.objects.filter(name=ai_project.name).first()
+    if not ui_project:
+        ui_project = UiProject.objects.create(
+            name=ai_project.name,
+            description=ai_project.description or '',
+            status='IN_PROGRESS',
+            base_url='',
+            owner=request.user
+        )
+        # 同步成员
+        if hasattr(ai_project, 'members'):
+            for member in ai_project.members.all():
+                ui_project.members.add(member)
+
+    return Response({
+        'id': ui_project.id,
+        'name': ui_project.name,
+        'created': True
+    })
+
+
+
 
 

@@ -21,7 +21,11 @@ from .views import (
     AICaseViewSet,
     UiNotificationLogViewSet,
     OperationRecordViewSet,
-    UiDashboardViewSet
+    UiDashboardViewSet,
+    AppDeviceViewSet,
+    AppConfigViewSet,
+    get_all_projects_unified,
+    ensure_ui_project,
 )
 from .views_config import EnvironmentConfigViewSet, AIIntelligentModeConfigViewSet
 
@@ -53,8 +57,14 @@ router.register(r'config/environment', EnvironmentConfigViewSet, basename='confi
 router.register(r'config/ai-mode', AIIntelligentModeConfigViewSet, basename='config-ai-mode')
 router.register(r'ai-models', AIIntelligentModeConfigViewSet, basename='ai-models')
 
+# App 自动化设备管理
+router.register(r'app-devices', AppDeviceViewSet)
+router.register(r'app-configs', AppConfigViewSet)
+
 urlpatterns = [
     path('', include(router.urls)),
+    path('all-projects/', get_all_projects_unified, name='all-projects-unified'),
+    path('ensure-ui-project/', ensure_ui_project, name='ensure-ui-project'),
 ]
 
 # 添加媒体文件路由

@@ -77,6 +77,42 @@
       </el-descriptions>
     </div>
 
+    <!-- ==================== 执行日志 ==================== -->
+    <div class="card-container" v-if="testcase" style="margin-top: 20px">
+      <div class="execution-log-header">
+        <h3 class="section-title">📋 执行日志</h3>
+        <el-button type="success" size="small" @click="openExecuteDialog">+ 新增执行</el-button>
+      </div>
+      
+      <div v-if="executionLogs.length === 0" class="empty-log">
+        暂无执行记录，点击"新增执行"开始记录
+      </div>
+      
+      <el-timeline v-else style="margin-top: 16px">
+        <el-timeline-item
+          v-for="log in executionLogs"
+          :key="log.id"
+          :timestamp="formatDate(log.executed_at)"
+          placement="top"
+          :type="log.result === 'pass' ? 'success' : 'danger'"
+          :icon="log.result === 'pass' ? Check : Close"
+          :color="log.result === 'pass' ? '#67c23a' : '#f56c6c'"
+          :hollow="true"
+        >
+          <div class="log-item">
+            <div class="log-result">
+              <el-tag :type="log.result === 'pass' ? 'success' : 'danger'" size="small">
+                {{ log.result === 'pass' ? '✅ 通过' : '❌ 失败' }}
+              </el-tag>
+              <span class="log-executor">{{ log.executed_by_name }}</span>
+            </div>
+            <div v-if="log.notes" class="log-notes">{{ log.notes }}</div>
+            <div v-else class="log-notes no-notes">无备注</div>
+          </div>
+        </el-timeline-item>
+      </el-timeline>
+    </div>
+
     <!-- 执行用例弹窗 -->
     <el-dialog v-model="showExecuteDialog" title="执行测试用例" width="420px" :close-on-click-modal="false">
       <div class="execute-info">
@@ -107,12 +143,30 @@
 import { ref, computed, watch, onMounted, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { Check, Close } from '@element-plus/icons-vue'
 import api from '@/utils/api'
 import dayjs from 'dayjs'
 
 const route = useRoute()
 const router = useRouter()
 const testcase = ref(null)
+
+// 执行日志
+const executionLogs = ref([])
+const loadingLogs = ref(false)
+
+const fetchExecutionLogs = async () => {
+  if (!testcase.value?.id) return
+  loadingLogs.value = true
+  try {
+    const response = await api.get(`/testcases/${testcase.value.id}/executions/`)
+    executionLogs.value = response.data || []
+  } catch {
+    executionLogs.value = []
+  } finally {
+    loadingLogs.value = false
+  }
+}
 
 // 上下文导航：同项目+同版本下的用例ID列表
 const neighborIds = ref([])
@@ -132,20 +186,75 @@ const getNeighborTitle = (idx) => {
   return neighborTitles.value[id] || `#${id}`
 }
 
-// 加载同项目+同版本下的全部用例（仅取id和title用于导航）
-const loadNeighborList = async (projectId, versionId) => {
-  try {
-    const params = { page_size: 200, ordering: 'id' }
-    if (projectId) params.project = projectId
-    if (versionId) params.version = versionId
-    const response = await api.get('/testcases/', { params })
+// 翻页拉全：循环请求直到没有 next，避免被单页条数截断
+const fetchNeighborPages = async (params) => {
+  const allItems = []
+  let page = 1
+  while (true) {
+    const p = { ...params, page }
+    const response = await api.get('/testcases/', { params: p })
     const items = response.data.results || []
-    neighborIds.value = items.map(t => t.id)
-    const titleMap = {}
-    items.forEach(t => { titleMap[t.id] = t.title })
-    neighborTitles.value = titleMap
+    if (items.length === 0) break
+    allItems.push(...items)
+    if (!response.data.next) break
+    page += 1
+    if (page > 1000) break // 安全阀，防止极端情况下死循环
+  }
+  return allItems
+}
+
+// 写入导航列表（id + title）
+const setNeighborData = (items) => {
+  neighborIds.value = items.map(t => t.id)
+  const titleMap = {}
+  items.forEach(t => { titleMap[t.id] = t.title })
+  neighborTitles.value = titleMap
+}
+
+// 按用例自身的 project+version（带 fallback）拉取导航列表
+const loadNeighborByCaseContext = async () => {
+  const projectId = testcase.value?.project?.id
+  const versions = testcase.value?.versions || []
+  const versionId = versions.length > 0 ? versions[0].id : null
+  const buildParams = (proj, ver) => {
+    const p = { page_size: 1000, ordering: '-created_at' }
+    if (proj) p.project = proj
+    if (ver) p.version = ver
+    return p
+  }
+  const currentId = Number(route.params.id)
+  let items = await fetchNeighborPages(buildParams(projectId, versionId))
+  if (items.length > 0 && items.map(t => t.id).indexOf(currentId) === -1) {
+    // 当前用例不在 project+version 结果中，去掉 version 重试
+    items = await fetchNeighborPages(buildParams(projectId, null))
+  }
+  if (items.length > 0 && items.map(t => t.id).indexOf(currentId) === -1) {
+    // 仍不在，则完全不过滤
+    items = await fetchNeighborPages({ page_size: 1000, ordering: '-created_at' })
+  }
+  setNeighborData(items)
+}
+
+// 加载导航列表：优先使用从列表页带入的筛选条件（route.query），否则按用例自身 project+version
+const loadNeighborList = async () => {
+  try {
+    const q = route.query || {}
+    const filterKeys = ['search', 'project', 'priority', 'status', 'version', 'feature_module', 'test_point']
+    const hasFilters = filterKeys.some(k => q[k])
+    if (hasFilters) {
+      const params = { page_size: 1000, ordering: '-created_at' }
+      filterKeys.forEach(k => { if (q[k]) params[k] = q[k] })
+      const items = await fetchNeighborPages(params)
+      setNeighborData(items)
+      const currentId = Number(route.params.id)
+      // 极端情况：当前用例不在筛选结果内（理论上不会，因从筛选列表进入），回退到用例上下文
+      if (items.length > 0 && neighborIds.value.indexOf(currentId) === -1) {
+        await loadNeighborByCaseContext()
+      }
+      return
+    }
+    await loadNeighborByCaseContext()
   } catch {
-    // 导航列表加载失败不影响详情显示
     neighborIds.value = []
     neighborTitles.value = {}
   }
@@ -155,11 +264,10 @@ const fetchTestCase = async () => {
   try {
     const response = await api.get(`/testcases/${route.params.id}/`)
     testcase.value = response.data
-    // 获取导航列表
-    const projectId = response.data.project?.id
-    const versions = response.data.versions || []
-    const versionId = versions.length > 0 ? versions[0].id : null
-    loadNeighborList(projectId, versionId)
+    // 获取导航列表（优先使用从列表页带入的筛选条件）
+    await loadNeighborList()
+    // 加载执行日志
+    fetchExecutionLogs()
   } catch (error) {
     ElMessage.error('获取用例详情失败')
   }
@@ -199,6 +307,7 @@ const confirmExecute = async () => {
     ElMessage.success(`执行完成：${executeForm.result === 'pass' ? '通过 ✅' : '失败 ❌'}`)
     showExecuteDialog.value = false
     await fetchTestCase()
+    await fetchExecutionLogs()
   } catch (error) {
     ElMessage.error('执行失败: ' + (error.response?.data?.detail || error.message))
   } finally {
@@ -209,7 +318,14 @@ const confirmExecute = async () => {
 const goToNeighbor = (delta) => {
   const idx = currentIndex.value + delta
   if (idx < 0 || idx >= neighborIds.value.length) return
-  router.replace(`/ai-generation/testcases/${neighborIds.value[idx]}`)
+  const targetId = neighborIds.value[idx]
+  if (!targetId) {
+    ElMessage.warning('目标用例 ID 不存在')
+    return
+  }
+  // 用 replace 而非 push：切换用例不新增历史记录，保证「返回」回到列表页
+  // 保留 route.query 中的筛选条件，确保上下翻始终在同一筛选集合内
+  router.replace({ path: `/ai-generation/testcases/${targetId}`, query: { ...route.query } })
 }
 
 const editTestCase = () => {
@@ -312,5 +428,53 @@ onMounted(() => {
   line-height: 1.6;
   color: #303133;
   font-family: inherit;
+}
+
+/* ===== 执行日志样式 ===== */
+.execution-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.section-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+  margin: 0;
+}
+
+.empty-log {
+  text-align: center;
+  color: #909399;
+  padding: 40px 0;
+  font-size: 14px;
+}
+
+.log-item {
+  .log-result {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 4px;
+  }
+  .log-executor {
+    font-size: 13px;
+    color: #606266;
+  }
+  .log-notes {
+    font-size: 13px;
+    color: #303133;
+    background: #f5f7fa;
+    padding: 8px 12px;
+    border-radius: 6px;
+    margin-top: 4px;
+    white-space: pre-wrap;
+  }
+  .log-notes.no-notes {
+    color: #c0c4cc;
+    font-style: italic;
+  }
 }
 </style>

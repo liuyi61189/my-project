@@ -12,6 +12,22 @@
           批量删除 ({{ selectedTestCases.length }})
         </el-button>
         <el-button 
+          v-if="!selectAllMode && selectedTestCases.length > 0"
+          type="primary"
+          @click="convertToUiAutomation(selectedTestCases)"
+          style="background:#409eff;border-color:#409eff;">
+          <el-icon><Promotion /></el-icon>
+          🚀 转UI自动化 ({{ selectedTestCases.length }})
+        </el-button>
+        <el-button 
+          v-if="!selectAllMode && selectedTestCases.length > 0"
+          type="success"
+          @click="openConvertAppiumDialog(selectedTestCases)"
+          style="background:#67c23a;border-color:#67c23a;">
+          <el-icon><Promotion /></el-icon>
+          📱 转Appium用例 ({{ selectedTestCases.length }})
+        </el-button>
+        <el-button 
           v-if="selectAllMode"
           type="danger" 
           @click="deleteAllFiltered"
@@ -230,11 +246,23 @@
             {{ formatDate(row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right" :show-overflow-tooltip="false">
+        <el-table-column label="操作" width="290" fixed="right" :show-overflow-tooltip="false">
           <template #default="{ row }">
             <el-button size="small" type="success" @click="openExecuteDialog(row)">执行</el-button>
             <el-button size="small" @click="editTestCase(row)">编辑</el-button>
             <el-button size="small" type="danger" @click="deleteTestCase(row)">删除</el-button>
+            <el-button
+              size="small"
+              type="primary"
+              @click="convertToUiAutomation([row])"
+              title="仅将这一条用例转为UI自动化AI用例"
+              style="background:#409eff;border-color:#409eff;">🚀 转UI</el-button>
+            <el-button
+              size="small"
+              type="success"
+              @click="openConvertAppiumDialog([row])"
+              title="转为UI自动化结构化用例（Appium App自动化），需回填元素定位器"
+              style="background:#67c23a;border-color:#67c23a;">📱 转Appium</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -319,16 +347,43 @@
       </template>
     </el-dialog>
   </div>
+    <!-- 转为 Appium 结构化用例：选择目标 UI 自动化项目 -->
+    <el-dialog v-model="convertAppiumVisible" title="转为 Appium 结构化用例" width="480px" @closed="resetConvertAppium">
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        title="将生成结构化用例（步骤 + 占位元素）"
+        description="每条用例会拆成步骤骨架，交互步骤带占位元素，定位器留空待你在「元素管理」回填控件 id 后即可用 Appium 引擎执行。"
+        style="margin-bottom:16px;"
+      />
+      <el-form label-width="110px">
+        <el-form-item label="目标项目" required>
+          <el-select v-model="selectedUiProject" placeholder="选择 UI 自动化项目" style="width:100%" :loading="loadingUiProjects">
+            <el-option v-for="p in uiProjects" :key="p.id" :label="p.name" :value="p.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="待转换">
+          {{ convertAppiumCases.length }} 条用例
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="convertAppiumVisible = false">取消</el-button>
+        <el-button type="success" :loading="convertingAppium" @click="confirmConvertAppium">确定转换</el-button>
+      </template>
+    </el-dialog>
+
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Search, Download, Delete, RefreshLeft, Select } from '@element-plus/icons-vue'
+import { Plus, Search, Download, Delete, RefreshLeft, Select, Promotion } from '@element-plus/icons-vue'
 import api from '@/utils/api'
 import dayjs from 'dayjs'
 import * as XLSX from 'xlsx'
+import { importTestcasesToAICase, convertTestcasesToAppium, getUiProjects } from '@/api/ui_automation'
 
 const router = useRouter()
 const route = useRoute()
@@ -648,7 +703,13 @@ const handlePageChange = () => {
 }
 
 const goToTestCase = (id) => {
-  router.push(`/ai-generation/testcases/${id}`)
+  // 将当前列表的筛选条件带入详情页，使「上一个/下一个」在同一筛选集合内切换
+  const q = {}
+  const src = route.query
+  ;['search', 'project', 'priority', 'status', 'version', 'feature_module', 'test_point'].forEach(k => {
+    if (src[k]) q[k] = src[k]
+  })
+  router.push({ path: `/ai-generation/testcases/${id}`, query: q })
 }
 
 const editTestCase = (testcase) => {
@@ -814,6 +875,106 @@ const refreshAfterDelete = async () => {
 // 获取序号
 const getSerialNumber = (index) => {
   return (currentPage.value - 1) * pageSize.value + index + 1
+}
+
+// 将选中的用例库用例（1条或多条）转为UI自动化AI用例，转换后可在 AI用例管理页直接执行
+const convertToUiAutomation = async (cases) => {
+  if (!cases || cases.length === 0) {
+    ElMessage.warning('请先选择要转换的测试用例')
+    return
+  }
+
+  const caseCount = cases.length
+  try {
+    await ElMessageBox.confirm(
+      caseCount === 1
+        ? '确定将这 1 条用例库用例转为UI自动化AI用例吗？转换后可在 AI 用例管理页直接执行。'
+        : `确定将选中的 ${caseCount} 条用例库用例转为UI自动化AI用例吗？转换后可在 AI 用例管理页直接执行。`,
+      '转为UI自动化',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'info'
+      }
+    )
+  } catch {
+    return
+  }
+
+  try {
+    const res = await importTestcasesToAICase({
+      case_ids: cases.map(c => c.id)
+    })
+    ElMessage.success((res.data && res.data.message) || '导入成功，已转为UI自动化AI用例')
+    if (selectedTestCases.value.length > 0) {
+      tableRef.value?.clearSelection()
+      selectedTestCases.value = []
+    }
+    router.push('/ai-intelligent-mode/cases')
+  } catch (error) {
+    console.error('转换失败:', error)
+    ElMessage.error('转换失败: ' + (error.response?.data?.error || error.message))
+  }
+}
+
+// 转为 Appium 结构化用例
+const convertAppiumVisible = ref(false)
+const convertAppiumCases = ref([])
+const uiProjects = ref([])
+const selectedUiProject = ref(null)
+const loadingUiProjects = ref(false)
+const convertingAppium = ref(false)
+
+const openConvertAppiumDialog = async (cases) => {
+  if (!cases || cases.length === 0) {
+    ElMessage.warning('请先选择要转换的测试用例')
+    return
+  }
+  convertAppiumCases.value = cases
+  selectedUiProject.value = null
+  convertAppiumVisible.value = true
+  loadingUiProjects.value = true
+  try {
+    const res = await getUiProjects({ page_size: 999 })
+    uiProjects.value = res.data.results || res.data || []
+    if (uiProjects.value.length === 1) {
+      selectedUiProject.value = uiProjects.value[0].id
+    }
+  } catch (e) {
+    ElMessage.error('加载 UI 自动化项目失败')
+  } finally {
+    loadingUiProjects.value = false
+  }
+}
+
+const resetConvertAppium = () => {
+  convertAppiumCases.value = []
+  selectedUiProject.value = null
+}
+
+const confirmConvertAppium = async () => {
+  if (!selectedUiProject.value) {
+    ElMessage.warning('请选择目标 UI 自动化项目')
+    return
+  }
+  convertingAppium.value = true
+  try {
+    const res = await convertTestcasesToAppium({
+      case_ids: convertAppiumCases.value.map(c => c.id),
+      ui_project_id: selectedUiProject.value
+    })
+    ElMessage.success((res.data && res.data.message) || '转换成功')
+    convertAppiumVisible.value = false
+    if (selectedTestCases.value.length > 0) {
+      tableRef.value?.clearSelection()
+      selectedTestCases.value = []
+    }
+  } catch (error) {
+    console.error('转换失败:', error)
+    ElMessage.error('转换失败: ' + (error.response?.data?.message || error.response?.data?.error || error.message))
+  } finally {
+    convertingAppium.value = false
+  }
 }
 
 // 批量删除

@@ -4,7 +4,12 @@
       <h1 class="page-title">测试用例管理</h1>
       <div class="header-actions">
         <el-select v-model="projectId" placeholder="选择项目" style="width: 200px; margin-right: 15px" @change="onProjectChange">
-          <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
+          <el-option-group label="UI自动化项目">
+            <el-option v-for="project in uiProjects" :key="project.id" :label="project.name" :value="project.id" />
+          </el-option-group>
+          <el-option-group label="AI用例项目">
+            <el-option v-for="project in aiProjects" :key="project.id" :label="project.name" :value="project.id" />
+          </el-option-group>
         </el-select>
         <el-button type="primary" @click="showCreateDialog = true">
           <el-icon><Plus /></el-icon>
@@ -85,17 +90,41 @@
               <el-select v-model="selectedEngine" placeholder="选择引擎" size="small" style="width: 130px; margin-right: 10px">
                 <el-option label="Playwright" value="playwright" />
                 <el-option label="Selenium" value="selenium" />
+                <el-option label="Appium" value="appium" />
               </el-select>
-              <el-select v-model="selectedBrowser" placeholder="选择浏览器" size="small" style="width: 120px; margin-right: 10px">
-                <el-option label="Chrome" value="chrome" />
-                <el-option label="Firefox" value="firefox" />
-                <el-option label="Safari" value="safari" />
-                <el-option label="Edge" value="edge" />
-              </el-select>
-              <el-select v-model="headlessMode" placeholder="运行模式" size="small" style="width: 110px; margin-right: 10px">
-                <el-option label="有头模式" :value="false" />
-                <el-option label="无头模式" :value="true" />
-              </el-select>
+              <!-- Web 引擎选项 -->
+              <template v-if="selectedEngine !== 'appium'">
+                <el-select v-model="selectedBrowser" placeholder="选择浏览器" size="small" style="width: 120px; margin-right: 10px">
+                  <el-option label="Chrome" value="chrome" />
+                  <el-option label="Firefox" value="firefox" />
+                  <el-option label="Safari" value="safari" />
+                  <el-option label="Edge" value="edge" />
+                </el-select>
+                <el-select v-model="headlessMode" placeholder="运行模式" size="small" style="width: 110px; margin-right: 10px">
+                  <el-option label="有头模式" :value="false" />
+                  <el-option label="无头模式" :value="true" />
+                </el-select>
+              </template>
+              <!-- Appium 选项 -->
+              <template v-if="selectedEngine === 'appium'">
+                <el-select v-model="selectedDeviceId" placeholder="选择设备" size="small" style="width: 150px; margin-right: 10px" filterable>
+                  <el-option
+                    v-for="d in appDevices"
+                    :key="d.id"
+                    :label="`${d.name} (${d.platform})`"
+                    :value="d.id"
+                    :disabled="d.status !== 'online'"
+                  />
+                </el-select>
+                <el-select v-model="selectedAppConfigId" placeholder="选择应用" size="small" style="width: 140px; margin-right: 10px" filterable>
+                  <el-option
+                    v-for="a in appConfigs"
+                    :key="a.id"
+                    :label="`${a.name}`"
+                    :value="a.id"
+                  />
+                </el-select>
+              </template>
               <el-button size="small" type="success" @click="runTestCase(selectedTestCase)" :loading="isRunning">
                 <el-icon v-if="!isRunning"><CaretRight /></el-icon>
                 {{ isRunning ? '执行中...' : '运行' }}
@@ -481,6 +510,7 @@ import {
   Search, Plus, Edit, Delete, Check, CaretRight, ArrowUp, ArrowDown, Rank, Picture, Warning, View, ZoomIn, Refresh, WarningFilled, MagicStick
 } from '@element-plus/icons-vue'
 import draggable from 'vuedraggable'
+import { useUnifiedProjects } from '@/utils/useUnifiedProjects'
 
 import {
   getUiProjects,
@@ -491,12 +521,15 @@ import {
   getTestCases,
   runTestCase as runTestCaseApi,
   copyTestCase as copyTestCaseApi,
-  getLocatorStrategies
+  getLocatorStrategies,
+  getAppDevices,
+  getAppConfigs
 } from '@/api/ui_automation'
 
 // 响应式数据
-const projects = ref([])
-const projectId = ref('')
+const { allProjects, uiProjects, aiProjects, loadProjects: loadAllProjects, resolveUiProjectId } = useUnifiedProjects()
+const projectId = ref('') // 格式: "ui_1" 或 "proj_2"
+const realProjectId = ref(null) // 实际 UiProject ID
 const testCases = ref([])
 const selectedTestCase = ref(null)
 const currentSteps = ref([])
@@ -514,6 +547,11 @@ const isRunning = ref(false)
 const selectedEngine = ref('playwright')  // 默认使用Playwright
 const selectedBrowser = ref('chrome')  // 默认使用Chrome
 const headlessMode = ref(false)  // 默认使用有头模式
+// Appium 相关
+const selectedDeviceId = ref(null)
+const selectedAppConfigId = ref(null)
+const appDevices = ref([])
+const appConfigs = ref([])
 const showVariableHelper = ref(false)
 const currentEditingStep = ref(null)
 const currentEditingField = ref('')
@@ -549,23 +587,17 @@ const parsedExecutionLogs = computed(() => {
 
 // 方法定义
 const loadProjects = async () => {
-  try {
-    const response = await getUiProjects({ page_size: 100 })
-    projects.value = response.data.results || response.data
-  } catch (error) {
-    ElMessage.error('获取项目列表失败')
-    console.error('获取项目列表失败:', error)
-  }
+  await loadAllProjects()
 }
 
 const loadTestCases = async () => {
-  if (!projectId.value) {
+  if (!realProjectId.value) {
     testCases.value = []
     return
   }
 
   try {
-    const response = await getTestCases({ project: projectId.value })
+    const response = await getTestCases({ project: realProjectId.value })
     testCases.value = response.data.results || response.data
   } catch (error) {
     console.error('获取测试用例失败:', error)
@@ -573,13 +605,13 @@ const loadTestCases = async () => {
 }
 
 const loadElements = async () => {
-  if (!projectId.value) {
+  if (!realProjectId.value) {
     availableElements.value = []
     return
   }
 
   try {
-    const response = await getElements({ project: projectId.value })
+    const response = await getElements({ project: realProjectId.value })
     availableElements.value = response.data.results || response.data
   } catch (error) {
     console.error('获取元素列表失败:', error)
@@ -591,6 +623,7 @@ const onProjectChange = async () => {
   currentSteps.value = []
   executionResult.value = null
 
+  realProjectId.value = await resolveUiProjectId(projectId.value)
   await Promise.all([
     loadTestCases(),
     loadElements()
@@ -709,17 +742,40 @@ const saveTestCase = async () => {
 }
 
 const runTestCase = async (testCase) => {
+  // Appium 引擎校验
+  if (selectedEngine.value === 'appium') {
+    if (!selectedDeviceId.value) {
+      ElMessage.warning('请选择测试设备')
+      return
+    }
+    if (!selectedAppConfigId.value) {
+      ElMessage.warning('请选择应用配置')
+      return
+    }
+  }
+
   isRunning.value = true
   try {
-    const modeText = headlessMode.value ? '无头模式' : '有头模式'
-    ElMessage.info(`开始执行测试用例... (引擎: ${selectedEngine.value.toUpperCase()}, 浏览器: ${selectedBrowser.value.toUpperCase()}, ${modeText})`)
+    if (selectedEngine.value === 'appium') {
+      ElMessage.info(`开始执行 App 自动化测试... (引擎: Appium, 设备: ${selectedDeviceId.value})`)
+    } else {
+      const modeText = headlessMode.value ? '无头模式' : '有头模式'
+      ElMessage.info(`开始执行测试用例... (引擎: ${selectedEngine.value.toUpperCase()}, 浏览器: ${selectedBrowser.value.toUpperCase()}, ${modeText})`)
+    }
 
-    const response = await runTestCaseApi(testCase.id, {
-      project_id: projectId.value,
+    const requestData = {
+      project_id: realProjectId.value,
       engine: selectedEngine.value,
       browser: selectedBrowser.value,
       headless: headlessMode.value
-    })
+    }
+    // Appium 额外参数
+    if (selectedEngine.value === 'appium') {
+      requestData.device_id = selectedDeviceId.value
+      requestData.app_config_id = selectedAppConfigId.value
+    }
+
+    const response = await runTestCaseApi(testCase.id, requestData)
 
     executionResult.value = response.data
     resultActiveTab.value = 'logs'
@@ -928,7 +984,7 @@ const saveTestCaseForm = async () => {
       name: testCaseForm.name,
       description: testCaseForm.description,
       priority: testCaseForm.priority,
-      project: projectId.value,
+      project: realProjectId.value,
       steps: []
     }
 
@@ -1048,12 +1104,37 @@ const previewScreenshot = (screenshot) => {
   showScreenshotPreview.value = true
 }
 
+// 加载 App 自动化设备和应用
+const loadAppDevicesAndConfigs = async () => {
+  try {
+    const [devicesRes, configsRes] = await Promise.allSettled([
+      getAppDevices({ status: 'online', page_size: 999 }),
+      getAppConfigs({ page_size: 999 })
+    ])
+    if (devicesRes.status === 'fulfilled') {
+      appDevices.value = devicesRes.value.data.results || devicesRes.value.data || []
+    }
+    if (configsRes.status === 'fulfilled') {
+      appConfigs.value = configsRes.value.data.results || configsRes.value.data || []
+    }
+  } catch (error) {
+    // 加载失败不影响主流程
+  }
+}
+
+// 监听引擎切换，加载 Appium 数据
+watch(selectedEngine, (newVal) => {
+  if (newVal === 'appium') {
+    loadAppDevicesAndConfigs()
+  }
+})
+
 // 组件挂载
 onMounted(async () => {
   await loadProjects()
 
-  if (projects.value.length > 0) {
-    projectId.value = projects.value[0].id
+  if (allProjects.value.length > 0) {
+    projectId.value = allProjects.value[0].id
     await onProjectChange()
   }
 })

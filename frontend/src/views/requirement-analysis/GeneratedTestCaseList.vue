@@ -183,6 +183,14 @@
                   ❌ 弃用
                 </button>
                 <button 
+                  v-if="task.status === 'completed'"
+                  class="convert-btn" 
+                  @click="convertToUiAutomation(task)"
+                  title="转为UI自动化AI用例并直接执行"
+                  style="background:#409eff;color:#fff;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;">
+                  🚀 转UI自动化
+                </button>
+                <button 
                   class="delete-btn" 
                   @click="deleteSingleTask(task)"
                   title="删除任务">
@@ -484,6 +492,7 @@
 <script>
 import api from '@/utils/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { importGeneratedToAICase } from '@/api/requirement-analysis'
 
 export default {
   name: 'GeneratedTestCaseList',
@@ -939,6 +948,32 @@ export default {
           params: { taskId: task.task_id }
         }).href
         window.open(url, '_blank')
+      }
+    },
+
+    // 将AI生成用例转为UI自动化AI用例（AICase），转换后可直接执行
+    async convertToUiAutomation(task) {
+      try {
+        await ElMessageBox.confirm(
+          `确定将任务"${task.title}"的所有AI生成用例转为UI自动化AI用例吗？转换后可在 AI 用例管理页直接执行。`,
+          '转为UI自动化',
+          {
+            confirmButtonText: '确定',
+            cancelButtonText: '取消',
+            type: 'info'
+          }
+        )
+      } catch {
+        return
+      }
+
+      try {
+        const res = await importGeneratedToAICase({ task_id: task.task_id })
+        ElMessage.success((res.data && res.data.message) || '导入成功，已转为UI自动化AI用例')
+        this.$router.push('/ai-intelligent-mode/cases')
+      } catch (error) {
+        console.error('转换失败:', error)
+        ElMessage.error('转换失败: ' + (error.response?.data?.error || error.message))
       }
     },
 

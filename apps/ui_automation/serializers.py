@@ -6,7 +6,8 @@ from .models import (
     ElementGroup, PageObject, PageObjectElement, ScriptStep, ScriptElementUsage,
     TestCase, TestCaseStep, TestCaseExecution, OperationRecord,
     UiScheduledTask, UiNotificationLog, UiTaskNotificationSetting,
-    AICase, AIExecutionRecord
+    AICase, AIExecutionRecord,
+    AppDevice, AppConfig
 )
 from django.contrib.auth import get_user_model
 
@@ -933,4 +934,49 @@ class UiTaskNotificationSettingSerializer(serializers.ModelSerializer):
         if 'webhook' in types:
             type_names.append('Webhook机器人')
         return ', '.join(type_names) if type_names else "无"
+
+
+# ==================== App 自动化序列化器 ====================
+
+class AppDeviceSerializer(serializers.ModelSerializer):
+    """移动设备序列化器"""
+    platform_display = serializers.CharField(source='get_platform_display', read_only=True)
+    device_type_display = serializers.CharField(source='get_device_type_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = AppDevice
+        fields = [
+            'id', 'name', 'platform', 'platform_display', 'platform_version',
+            'device_type', 'device_type_display', 'udid', 'appium_server_url',
+            'status', 'status_display', 'resolution', 'capabilities',
+            'last_heartbeat', 'notes', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['last_heartbeat', 'created_at', 'updated_at']
+
+
+class AppConfigSerializer(serializers.ModelSerializer):
+    """应用配置序列化器"""
+    platform_display = serializers.CharField(source='get_platform_display', read_only=True)
+    project_name = serializers.CharField(source='project.name', read_only=True, allow_null=True)
+    ai_project_name = serializers.CharField(source='ai_project.name', read_only=True, allow_null=True)
+    # 统一展示的项目名称（优先UiProject，其次AI Project）
+    display_project_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AppConfig
+        fields = [
+            'id', 'name', 'platform', 'platform_display', 'package_name',
+            'app_activity', 'app_path', 'version', 'project', 'project_name',
+            'ai_project', 'ai_project_name', 'display_project_name',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+    def get_display_project_name(self, obj):
+        if obj.project:
+            return obj.project.name
+        if obj.ai_project:
+            return obj.ai_project.name
+        return None
 

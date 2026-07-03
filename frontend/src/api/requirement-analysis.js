@@ -147,3 +147,12 @@ export function deletePromptConfig(id) {
     method: 'delete'
   })
 }
+
+// 将AI生成用例（需求分析模块）批量导入为UI自动化AI用例，导入后可直接执行
+export function importGeneratedToAICase(data) {
+  return request({
+    url: '/ui-automation/ai-cases/import-from-generated/',
+    method: 'post',
+    data
+  })
+}

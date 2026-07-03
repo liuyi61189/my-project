@@ -1002,6 +1002,85 @@ class UiTaskNotificationSetting(models.Model):
         return UnifiedNotificationConfig.objects.filter(is_default=True, is_active=True).first()
 
 
+# ==================== App 自动化相关模型 ====================
+
+class AppDevice(models.Model):
+    """移动设备管理"""
+    PLATFORM_CHOICES = [
+        ('android', 'Android'),
+        ('ios', 'iOS'),
+    ]
+
+    DEVICE_TYPE_CHOICES = [
+        ('emulator', '模拟器'),
+        ('real', '真机'),
+    ]
+
+    STATUS_CHOICES = [
+        ('online', '在线'),
+        ('offline', '离线'),
+        ('busy', '占用中'),
+        ('error', '异常'),
+    ]
+
+    name = models.CharField(max_length=200, verbose_name='设备名称')
+    platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES, verbose_name='平台')
+    platform_version = models.CharField(max_length=50, blank=True, verbose_name='系统版本')
+    device_type = models.CharField(max_length=20, choices=DEVICE_TYPE_CHOICES, default='real', verbose_name='设备类型')
+    udid = models.CharField(max_length=200, unique=True, verbose_name='设备唯一标识')
+    appium_server_url = models.CharField(max_length=500, default='http://localhost:4723', verbose_name='Appium Server地址')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='offline', verbose_name='设备状态')
+    resolution = models.CharField(max_length=50, blank=True, verbose_name='屏幕分辨率')
+    capabilities = models.JSONField(default=dict, blank=True, verbose_name='额外配置', help_text='额外的Appium Capabilities')
+    last_heartbeat = models.DateTimeField(null=True, blank=True, verbose_name='最后心跳时间')
+    notes = models.TextField(blank=True, verbose_name='备注')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'app_devices'
+        verbose_name = '移动设备'
+        verbose_name_plural = '移动设备'
+        ordering = ['platform', 'name']
+
+    def __str__(self):
+        return f'{self.name} ({self.platform})'
+
+
+class AppConfig(models.Model):
+    """被测应用配置"""
+    PLATFORM_CHOICES = [
+        ('android', 'Android'),
+        ('ios', 'iOS'),
+    ]
+
+    name = models.CharField(max_length=200, verbose_name='应用名称')
+    platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES, verbose_name='平台')
+    package_name = models.CharField(max_length=200, blank=True, verbose_name='包名/Bundle ID',
+                                    help_text='Android包名 或 iOS Bundle ID')
+    app_activity = models.CharField(max_length=200, blank=True, verbose_name='启动Activity',
+                                    help_text='仅Android需要')
+    app_path = models.CharField(max_length=500, blank=True, verbose_name='应用文件路径',
+                                help_text='APK/IPA文件路径，留空则使用已安装应用')
+    version = models.CharField(max_length=50, blank=True, verbose_name='应用版本')
+    project = models.ForeignKey(UiProject, on_delete=models.CASCADE, related_name='app_configs',
+                                verbose_name='所属项目', null=True, blank=True)
+    ai_project = models.ForeignKey('projects.Project', on_delete=models.SET_NULL, related_name='app_configs',
+                                   verbose_name='AI用例项目', null=True, blank=True,
+                                   help_text='关联AI生成测试用例模块中的项目')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'app_configs'
+        verbose_name = '应用配置'
+        verbose_name_plural = '应用配置'
+        ordering = ['platform', 'name']
+
+    def __str__(self):
+        return f'{self.name} ({self.platform})'
+
+
 class AICase(models.Model):
     """AI测试用例"""
     project = models.ForeignKey(UiProject, on_delete=models.CASCADE, null=True, blank=True, verbose_name='所属项目')
