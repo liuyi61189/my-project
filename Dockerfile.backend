@@ -1,0 +1,30 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# 安装系统依赖（MySQL客户端编译必需）
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        default-libmysqlclient-dev \
+        build-essential \
+        pkg-config \
+        gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装Python依赖（使用清华镜像加速）
+COPY requirements.txt .
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+
+# 复制项目代码
+COPY . .
+
+# 创建必要目录
+RUN mkdir -p logs media allure static
+
+EXPOSE 8000
+
+# 启动脚本：等待MySQL就绪后执行迁移并启动
+CMD ["python", "docker_start.py"]

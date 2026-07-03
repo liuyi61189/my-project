@@ -1,0 +1,63 @@
+services:
+
+  mysql:
+    image: mysql:8.0
+    container_name: testhub-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-testhub}
+      MYSQL_USER: ${MYSQL_USER:-testhub}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - testhub-mysql-data:/var/lib/mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    networks:
+      - testhub-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${MYSQL_USER:-testhub}", "-p${MYSQL_PASSWORD}"]
+      interval: 5s
+      timeout: 10s
+      retries: 15
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: testhub-backend
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - testhub-media:/app/media
+      - testhub-logs:/app/logs
+      - ./knowledge-base:/app/knowledge-bases
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - testhub-net
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: testhub-frontend
+    restart: always
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    networks:
+      - testhub-net
+
+networks:
+  testhub-net:
+    driver: bridge
+
+volumes:
+  testhub-mysql-data:
+  testhub-media:
+  testhub-logs:
