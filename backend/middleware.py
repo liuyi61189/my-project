@@ -1,3 +1,7 @@
-# 此文件原有的 DisableCSRFMiddleware 已移除。
-# CSRF 保护现已恢复，API 接口通过 @csrf_exempt 逐个豁免（JWT 认证不受 CSRF 影响）。
-# Admin 后台保留完整 CSRF 保护。
+from django.utils.deprecation import MiddlewareMixin
+
+class DisableCSRFMiddleware(MiddlewareMixin):
+    def process_request(self, request):
+        # 对所有API路径禁用CSRF检查（JWT Bearer认证不需要CSRF）
+        if request.path.startswith('/api/'):
+            setattr(request, '_dont_enforce_csrf_checks', True)
