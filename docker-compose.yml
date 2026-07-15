@@ -37,6 +37,8 @@ services:
         condition: service_healthy
     networks:
       - testhub-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
 

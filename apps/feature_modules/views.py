@@ -21,16 +21,39 @@ class FeatureModuleListCreateView(ProjectScopedMixin, generics.ListCreateAPIView
     ordering_fields = ['created_at', 'name']
     ordering = ['project', 'name']
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        version_id = self.request.query_params.get('version_id')
+        if version_id:
+            qs = qs.filter(versions__id=version_id)
+        return qs.distinct()
+
     def perform_create(self, serializer):
         user = self.request.user
         project_id = self.request.data.get('project_id')
+        name = self.request.data.get('name', '').strip()
+        version_ids = self.request.data.get('version_ids', [])
         project = None
         if project_id:
             try:
                 project = self.get_accessible_projects().get(id=project_id)
             except Project.DoesNotExist:
                 pass
-        serializer.save(created_by=user, project=project)
+
+        # 防重：同一项目下同名功能模块直接返回已有的（幂等）
+        if name and project:
+            existing = FeatureModule.objects.filter(project=project, name=name).first()
+            if existing:
+                # 将 serializer instance 设为已有记录，返回 200 而非创建新记录
+                serializer.instance = existing
+                # 同时关联版本
+                if version_ids:
+                    existing.versions.add(*version_ids)
+                return
+
+        instance = serializer.save(created_by=user, project=project)
+        if version_ids:
+            instance.versions.set(version_ids)
 
 
 class FeatureModuleDetailView(ProjectScopedMixin, generics.RetrieveUpdateDestroyAPIView):
@@ -39,17 +62,28 @@ class FeatureModuleDetailView(ProjectScopedMixin, generics.RetrieveUpdateDestroy
     serializer_class = FeatureModuleSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        version_ids = self.request.data.get('version_ids')
+        if version_ids is not None:
+            instance.versions.set(version_ids)
+
 
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
 def get_project_feature_modules(request, project_id):
-    """获取指定项目的功能模块列表"""
+    """获取指定项目的功能模块列表（支持 version_id 过滤只返回该版本关联的模块）"""
     accessible_projects = get_accessible_projects_for_user(request.user)
 
     if not accessible_projects.filter(id=project_id).exists():
         return Response({'error': '没有权限访问该项目'}, status=status.HTTP_403_FORBIDDEN)
 
-    modules = FeatureModule.objects.filter(project_id=project_id).order_by('name')
+    modules = FeatureModule.objects.filter(project_id=project_id)
+    # 按版本过滤
+    version_id = request.query_params.get('version_id')
+    if version_id:
+        modules = modules.filter(versions__id=version_id)
+    modules = modules.order_by('name')
     from .serializers import FeatureModuleSerializer
     serializer = FeatureModuleSerializer(modules, many=True)
     return Response(serializer.data)
@@ -75,6 +109,7 @@ class TestPointListCreateView(ProjectScopedMixin, generics.ListCreateAPIView):
     def perform_create(self, serializer):
         user = self.request.user
         feature_module_id = self.request.data.get('feature_module_id')
+        name = self.request.data.get('name', '').strip()
         feature_module = None
         if feature_module_id:
             try:
@@ -84,6 +119,14 @@ class TestPointListCreateView(ProjectScopedMixin, generics.ListCreateAPIView):
                 feature_module = accessible_modules.get(id=feature_module_id)
             except FeatureModule.DoesNotExist:
                 pass
+
+        # 防重：同一功能模块下同名测试点直接返回已有的（幂等）
+        if name and feature_module:
+            existing = TestPoint.objects.filter(feature_module=feature_module, name=name).first()
+            if existing:
+                serializer.instance = existing
+                return
+
         serializer.save(created_by=user, feature_module=feature_module)
 
 

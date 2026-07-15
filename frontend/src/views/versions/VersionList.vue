@@ -192,6 +192,9 @@
           <el-button type="primary" size="small" @click="openCreateModuleDialog" :disabled="!manageVersion?.projects?.length">
             <el-icon><Plus /></el-icon> 新增功能模块
           </el-button>
+          <el-button size="small" @click="openLinkModuleDialog" :disabled="!manageVersion?.projects?.length">
+            <el-icon><Link /></el-icon> 关联已有模块
+          </el-button>
         </div>
 
         <!-- 功能模块列表 -->
@@ -240,7 +243,7 @@
     </el-dialog>
 
     <!-- 新增/编辑功能模块弹窗 -->
-    <el-dialog v-model="createModuleVisible" :title="editingModuleId ? '编辑功能模块' : '新增功能模块'" width="450px" :close-on-click-modal="false">
+    <el-dialog v-model="createModuleVisible" :title="editingModuleId ? '编辑功能模块' : '新增功能模块'" width="500px" :close-on-click-modal="false">
       <el-form :model="moduleForm" ref="moduleFormRef" label-width="90px" :rules="moduleRules">
         <el-form-item label="所属项目" prop="project_id">
           <el-select v-model="moduleForm.project_id" placeholder="请选择项目" style="width: 100%">
@@ -258,12 +261,47 @@
         <el-form-item label="模块描述">
           <el-input v-model="moduleForm.description" type="textarea" :rows="2" placeholder="可选填描述" />
         </el-form-item>
+        <el-form-item label="关联版本">
+          <el-checkbox-group v-model="moduleForm.version_ids" style="width: 100%">
+            <el-checkbox
+              v-for="v in allVersionsForModule"
+              :key="v.id"
+              :label="v.id"
+              :value="v.id"
+            >{{ v.name }}</el-checkbox>
+          </el-checkbox-group>
+          <div style="color: #909399; font-size: 12px; margin-top: 4px">选择该功能模块所属的版本（可多选）</div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="createModuleVisible = false">取消</el-button>
         <el-button type="primary" @click="saveModule" :loading="moduleSaving">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 关联已有模块弹窗 -->
+    <el-dialog v-model="linkModuleVisible" title="关联已有模块" width="500px" :close-on-click-modal="false">
+      <div v-if="linkLoading" class="loading-wrapper"><el-loading /></div>
+      <div v-else-if="!linkableModules.length" class="empty-modules">
+        <el-empty description="项目中暂无其他可关联的模块" />
+      </div>
+      <div v-else>
+        <div style="color:#909399;font-size:12px;margin-bottom:10px">
+          勾选要关联到「{{ manageVersion?.name }}」的模块（仅显示尚未关联本版本的模块）
+        </div>
+        <el-checkbox-group v-model="selectedLinkModuleIds" style="width:100%">
+          <div v-for="m in linkableModules" :key="m.id" class="link-module-item">
+            <el-checkbox :label="m.id" :value="m.id">{{ m.name }}</el-checkbox>
+            <span class="link-module-project">{{ m.project?.name }}</span>
+          </div>
+        </el-checkbox-group>
+      </div>
+      <template #footer>
+        <el-button @click="linkModuleVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveLinkModules" :loading="linkSaving" :disabled="!selectedLinkModuleIds.length">确认关联</el-button>
+      </template>
+    </el-dialog>
+
 
     <!-- 新增/编辑测试点弹窗 -->
     <el-dialog v-model="createTestPointVisible" :title="editingTestPointId ? '编辑测试点' : '新增测试点'" width="450px" :close-on-click-modal="false">
@@ -289,7 +327,7 @@
 <script setup>
 import { ref, reactive, onMounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Search, Delete, ArrowRight, Edit } from '@element-plus/icons-vue'
+import { Plus, Search, Delete, ArrowRight, Edit, Link } from '@element-plus/icons-vue'
 import api from '@/utils/api'
 import dayjs from 'dayjs'
 
@@ -330,6 +368,66 @@ const modulesList = ref([])
 const moduleLoading = ref(false)
 const expandedModules = ref(new Set())
 
+// 关联已有模块
+const linkModuleVisible = ref(false)
+const linkLoading = ref(false)
+const linkSaving = ref(false)
+const linkableModules = ref([])
+const selectedLinkModuleIds = ref([])
+
+const openLinkModuleDialog = async () => {
+  linkModuleVisible.value = true
+  linkLoading.value = true
+  selectedLinkModuleIds.value = []
+  try {
+    const projectIds = manageVersion.value.projects.map(p => p.id)
+    const allModules = []
+    for (const pid of projectIds) {
+      const res = await api.get(`/feature-modules/projects/${pid}/modules/`)
+      allModules.push(...(res.data || []))
+    }
+    // 去重
+    const seen = new Set()
+    const unique = allModules.filter(m => {
+      if (seen.has(m.id)) return false
+      seen.add(m.id)
+      return true
+    })
+    // 仅显示尚未关联当前版本的模块
+    const vid = manageVersion.value.id
+    linkableModules.value = unique.filter(m => {
+      const vs = m.versions || []
+      return !vs.some(v => v.id === vid)
+    })
+  } catch {
+    linkableModules.value = []
+  } finally {
+    linkLoading.value = false
+  }
+}
+
+const saveLinkModules = async () => {
+  if (!selectedLinkModuleIds.value.length) return
+  linkSaving.value = true
+  try {
+    const vid = manageVersion.value.id
+    // 逐个模块追加关联当前版本（保留其原有版本）
+    for (const mid of selectedLinkModuleIds.value) {
+      const m = linkableModules.value.find(x => x.id === mid)
+      const existing = (m?.versions || []).map(v => v.id)
+      const newVersions = existing.includes(vid) ? existing : [...existing, vid]
+      await api.put(`/feature-modules/${mid}/`, { version_ids: newVersions })
+    }
+    ElMessage.success(`已关联 ${selectedLinkModuleIds.value.length} 个模块到 ${manageVersion.value.name}`)
+    linkModuleVisible.value = false
+    await fetchModulesForVersion()
+  } catch {
+    ElMessage.error('关联模块失败')
+  } finally {
+    linkSaving.value = false
+  }
+}
+
 const fetchModulesForVersion = async () => {
   if (!manageVersion.value?.projects?.length) {
     modulesList.value = []
@@ -341,7 +439,10 @@ const fetchModulesForVersion = async () => {
     const allModules = []
     for (const pid of projectIds) {
       try {
-        const res = await api.get(`/feature-modules/projects/${pid}/modules/`)
+        // 传 version_id 参数，只返回该版本关联的模块
+        const res = await api.get(`/feature-modules/projects/${pid}/modules/`, {
+          params: { version_id: manageVersion.value.id }
+        })
         allModules.push(...(res.data || []))
       } catch (e) {
         console.error(`加载项目 ${pid} 的模块失败:`, e)
@@ -407,28 +508,56 @@ const moduleSaving = ref(false)
 const moduleForm = reactive({
   name: '',
   description: '',
-  project_id: null
+  project_id: null,
+  version_ids: []
 })
 const moduleRules = {
   project_id: [{ required: true, message: '请选择所属项目', trigger: 'change' }],
   name: [{ required: true, message: '请输入模块名称', trigger: 'blur' }]
 }
+const allVersionsForModule = ref([])
 
-const openCreateModuleDialog = () => {
+const fetchAllVersionsForModule = async () => {
+  try {
+    const res = await api.get('/versions/')
+    const all = res.data.results || res.data || []
+    // 只保留与当前版本所属项目相关的版本
+    const projectIds = (manageVersion.value?.projects || []).map(p => p.id)
+    if (projectIds.length > 0) {
+      allVersionsForModule.value = all.filter(v => {
+        if (!v.projects || !Array.isArray(v.projects)) return false
+        return v.projects.some(p => projectIds.includes(p.id))
+      }).map((v) => ({ id: v.id, name: v.name }))
+    } else {
+      allVersionsForModule.value = all.map((v) => ({ id: v.id, name: v.name }))
+    }
+  } catch {}
+}
+
+const openCreateModuleDialog = async () => {
   editingModuleId.value = null
   moduleForm.name = ''
   moduleForm.description = ''
   moduleForm.project_id = manageVersion.value?.projects?.[0]?.id || null
+  moduleForm.version_ids = manageVersion.value ? [manageVersion.value.id] : []
   createModuleVisible.value = true
+  await fetchAllVersionsForModule()
   nextTick(() => moduleFormRef.value?.resetFields())
 }
 
-const openEditModule = (module) => {
+const openEditModule = async (module) => {
   editingModuleId.value = module.id
   moduleForm.name = module.name
   moduleForm.description = module.description || ''
   moduleForm.project_id = module.project?.id || module.project_id
+  // 编辑时从模块已有的版本列表中提取 id
+  if (module.versions && Array.isArray(module.versions)) {
+    moduleForm.version_ids = module.versions.map((v) => v.id || v)
+  } else {
+    moduleForm.version_ids = manageVersion.value ? [manageVersion.value.id] : []
+  }
   createModuleVisible.value = true
+  await fetchAllVersionsForModule()
   nextTick(() => moduleFormRef.value?.clearValidate())
 }
 
@@ -459,7 +588,9 @@ const saveModule = async () => {
     const payload = {
       name: moduleForm.name.trim(),
       description: moduleForm.description.trim(),
-      project_id: moduleForm.project_id
+      project_id: moduleForm.project_id,
+      // 使用用户在复选框中选择的版本
+      version_ids: moduleForm.version_ids
     }
     if (editingModuleId.value) {
       await api.put(`/feature-modules/${editingModuleId.value}/`, payload)
@@ -935,5 +1066,22 @@ onMounted(() => {
 .no-data-text {
   color: #909399;
   font-size: 13px;
+}
+
+/* 关联已有模块弹窗 */
+.link-module-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  margin-bottom: 8px;
+
+  .link-module-project {
+    color: #909399;
+    font-size: 12px;
+    margin-left: auto;
+  }
 }
 </style>

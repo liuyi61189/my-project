@@ -118,8 +118,8 @@
             <!-- 左侧：文件树 -->
             <div class="kb-fs-tree">
               <div class="kb-fs-tree-header">
-                <h4>📁 知识库文件</h4>
-                <div style="display:flex;align-items:center;gap:6px;">
+                <h4>知识库</h4>
+                <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
                   <el-button size="small" type="primary" plain @click="openKbGenerator">
                     🤖 AI 生成
                   </el-button>
@@ -134,37 +134,15 @@
                 <el-empty description="目录为空" :image-size="60" />
               </div>
               <div v-else class="kb-fs-tree-list">
-                <template v-for="node in fsFiles" :key="node.path">
-                  <!-- 目录 -->
-                  <div v-if="node.type === 'directory'" class="kb-fs-dir">
-                    <div class="kb-fs-dir-name" @click="toggleDir(node.path)">
-                      <el-icon><FolderOpened v-if="expandedDirs.has(node.path)" /><Folder v-else /></el-icon>
-                      {{ node.name }}
-                    </div>
-                    <div v-show="expandedDirs.has(node.path)" class="kb-fs-dir-children">
-                      <div
-                        v-for="child in node.children"
-                        :key="child.path"
-                        class="kb-fs-file"
-                        :class="{ active: selectedFile === child.path }"
-                        @click="selectFile(child)"
-                      >
-                        <el-icon><Document /></el-icon>
-                        <span class="kb-fs-file-name">{{ child.title || child.name }}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <!-- 文件 -->
-                  <div
-                    v-else
-                    class="kb-fs-file"
-                    :class="{ active: selectedFile === node.path }"
-                    @click="selectFile(node)"
-                  >
-                    <el-icon><Document /></el-icon>
-                    <span class="kb-fs-file-name">{{ node.title || node.name }}</span>
-                  </div>
-                </template>
+                <FsTreeNode
+                  v-for="node in fsFiles"
+                  :key="node.path"
+                  :node="node"
+                  :selected-file="selectedFile"
+                  :expanded-dirs="expandedDirs"
+                  @select-file="selectFile"
+                  @toggle-dir="toggleDir"
+                />
               </div>
             </div>
 
@@ -182,9 +160,20 @@
               <template v-else>
                 <!-- 文件头 -->
                 <div class="kb-fs-content-header">
-                  <div class="kb-fs-content-title">
+                  <div class="kb-fs-content-title" @click="handleTitleClick">
                     <el-icon><Document /></el-icon>
-                    <span>{{ currentFileName }}</span>
+                    <template v-if="renamingFileName">
+                      <el-input
+                        ref="renameFileNameInput"
+                        v-model="editingFileName"
+                        size="small"
+                        style="width:220px"
+                        @keyup.enter="confirmRenameFileName"
+                        @keyup.escape="cancelRenameFileName"
+                        @blur="confirmRenameFileName"
+                      />
+                    </template>
+                    <span v-else class="kb-fs-filename">{{ currentFileName }}</span>
                   </div>
                   <div style="display:flex;align-items:center;gap:8px;">
                     <span class="kb-fs-content-meta">{{ currentFileSize }} / {{ currentFileDate }}</span>
@@ -217,11 +206,23 @@
     </div>
 
     <!-- FS 新建文件弹窗 -->
-    <el-dialog v-model="showNewFileDialog" title="📄 新建知识库文件" width="500px" destroy-on-close>
+    <el-dialog v-model="showNewFileDialog" title="📄 新建知识库文件" width="520px" destroy-on-close @open="onOpenNewFileDialog">
       <el-form label-width="80px">
+        <el-form-item label="目标目录">
+          <el-cascader
+            v-model="newFileDir"
+            :options="dirCascaderOptions"
+            :props="{ checkStrictly: true, emitPath: false, value: 'path', label: 'name', children: 'children' }"
+            placeholder="选择目录（默认根目录）"
+            clearable
+            style="width:100%"
+            filterable
+          />
+          <div style="font-size:12px;color:#c0c4cc;margin-top:4px">选择文件要创建在哪个文件夹下</div>
+        </el-form-item>
         <el-form-item label="文件名">
-          <el-input v-model="newFileName" placeholder="例：03-新功能说明.md" clearable />
-          <div style="font-size:12px;color:#c0c4cc;margin-top:4px">必须以 .md 结尾；子目录用 / 分隔，如 subdir/文件名.md</div>
+          <el-input v-model="newFileName" placeholder="例：3.3.6-新功能说明.md" clearable />
+          <div style="font-size:12px;color:#c0c4cc;margin-top:4px">必须以 .md 结尾</div>
         </el-form-item>
         <el-form-item label="初始内容">
           <el-input v-model="newFileContent" type="textarea" :rows="7" placeholder="# 标题&#10;&#10;在此输入内容..." />
@@ -429,7 +430,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Document, Folder, FolderOpened, Edit, Delete, Check, Close, ArrowRight, ArrowDown } from '@element-plus/icons-vue'
@@ -504,6 +505,11 @@ const showNewFileDialog = ref(false)
 const newFileName = ref('')
 const newFileContent = ref('')
 const newFileCreating = ref(false)
+const newFileDir = ref('')  // 目标目录路径，空=根目录
+// 文件名重命名
+const renamingFileName = ref(false)
+const editingFileName = ref('')
+const renameFileNameInput = ref(null)
 
 // ============================================================
 // AI 生成知识库
@@ -595,6 +601,11 @@ const toggleDir = (path) => {
 }
 
 const selectFile = async (node) => {
+  // 目录不读取内容，仅切换展开/折叠，避免误发读文件请求导致 404
+  if (node.type === 'directory') {
+    toggleDir(node.path)
+    return
+  }
   if (fsEditing.value) {
     fsEditing.value = false
     fsEditContent.value = ''
@@ -658,20 +669,64 @@ const deleteFile = async () => {
   }
 }
 
+// ---- 文件名重命名 ----
+const handleTitleClick = () => {
+  if (!fsEditing.value) startRenameFileName()
+}
+const startRenameFileName = () => {
+  editingFileName.value = currentFileName.value
+  renamingFileName.value = true
+  nextTick(() => renameFileNameInput.value?.focus())
+}
+const cancelRenameFileName = () => {
+  renamingFileName.value = false
+  editingFileName.value = ''
+}
+const confirmRenameFileName = async () => {
+  const newName = editingFileName.value.trim()
+  if (!newName || newName === currentFileName.value) {
+    renamingFileName.value = false
+    return
+  }
+  if (!newName.endsWith('.md')) {
+    // 自动补 .md
+    editingFileName.value = newName + '.md'
+  }
+  try {
+    const res = await api.patch(
+      `/projects/${route.params.id}/knowledge/fs/file/${encodeURIComponent(selectedFile.value)}/`,
+      { new_name: editingFileName.value.trim() }
+    )
+    // 更新缓存和选中状态
+    const oldPath = selectedFile.value
+    delete fileContentCache.value[oldPath]
+    selectedFile.value = res.data.path
+    fileContentCache.value[res.data.path] = res.data
+    renamingFileName.value = false
+    fetchFsTree()
+    ElMessage.success('重命名成功')
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '重命名失败')
+  }
+}
+
 const createFile = async () => {
   const fname = newFileName.value.trim()
   if (!fname) { ElMessage.warning('请输入文件名'); return }
   if (!fname.endsWith('.md')) { ElMessage.warning('文件名必须以 .md 结尾'); return }
   newFileCreating.value = true
   try {
+    // 拼接目标路径：目录 + 文件名
+    const targetPath = (newFileDir.value ? newFileDir.value + '/' : '') + fname
     const res = await api.post(`/projects/${route.params.id}/knowledge/fs/create/`, {
-      path: fname,
+      path: targetPath,
       content: newFileContent.value
     })
     ElMessage.success('文件创建成功')
     showNewFileDialog.value = false
     newFileName.value = ''
     newFileContent.value = ''
+    newFileDir.value = ''
     await fetchFsTree()
     selectedFile.value = res.data.path
     fileContentCache.value[res.data.path] = res.data
@@ -679,6 +734,29 @@ const createFile = async () => {
     ElMessage.error(e.response?.data?.error || '创建失败')
   } finally {
     newFileCreating.value = false
+  }
+}
+
+// ---- 目录级联选择器 ----
+const dirCascaderOptions = computed(() => {
+  /** 从 fsFiles 构建只含目录的级联选项 */
+  const toOptions = (nodes) => nodes.filter(n => n.type === 'directory').map(n => ({
+    name: n.name,
+    path: n.path,
+    children: toOptions(n.children || [])
+  }))
+  return toOptions(fsFiles.value)
+})
+
+const onOpenNewFileDialog = () => {
+  // 自动定位到当前选中项所在的目录
+  const current = selectedFile.value
+  if (current) {
+    // 如果选中的是文件，取其父目录；如果是文件夹，取自身
+    const lastSlash = current.lastIndexOf('/')
+    newFileDir.value = lastSlash > 0 ? current.substring(0, lastSlash) : ''
+  } else {
+    newFileDir.value = ''
   }
 }
 
@@ -1035,6 +1113,80 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('paste', onKbGenPaste)
 })
+
+// ============================================================
+// 递归文件树节点组件（支持任意层级深度）
+// ============================================================
+import { h } from 'vue'
+
+// SVG 图标定义（内联，避免 Element Plus 图标尺寸问题）
+const ChevronRight = { render() { return h('svg', { viewBox: '0 0 16 16', fill: 'currentColor', width: '16', height: '16' }, [h('path', { d: 'M6 4l4 4-4 4' })]) } }
+const ChevronDown = { render() { return h('svg', { viewBox: '0 0 16 16', fill: 'currentColor', width: '16', height: '16' }, [h('path', { d: 'M4 6l4 4 4-4' })]) } }
+
+// 彩色文件夹图标（闭合）
+const FolderIcon = { render() {
+  return h('svg', { viewBox: '0 0 16 16', width: '16', height: '16' }, [
+    h('path', { fill: '#dcb67a', d: 'M14 4.5v8a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 12.5v-9A1.5 1.5 0 013.5 2h3.086a1.5 1.5 0 011.06.44l.91.914A1.5 1.5 0 009.586 4H12.5A1.5 1.5 0 0114 4.5z' }),
+    h('path', { fill: '#e8c88a', opacity: 0.7, d: 'M2 5h12v7.5a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 12.5V5z' })
+  ])
+}}
+
+// 彩色文件夹图标（展开）
+const FolderOpenIcon = { render() {
+  return h('svg', { viewBox: '0 0 16 16', width: '16', height: '16' }, [
+    h('path', { fill: '#dcb67a', d: 'M2 13V4.5A1.5 1.5 0 013.5 3h3.086a1.5 1.5 0 011.06.44l.91.914A1.5 1.5 0 009.586 5H12.5A1.5 1.5 0 0114 6.5V13a1 1 0 01-1 1H3a1 1 0 01-1-1z' }),
+    h('path', { fill: '#e8c88a', opacity: 0.7, d: 'M1.5 13.5L3 8h10l1.5 5.5a.5.5 0 01-.48.65H1.98a.5.5 0 01-.48-.65z' })
+  ])
+}}
+
+// Markdown 文件图标（蓝色）
+const MdFileIcon = { render() {
+  return h('svg', { viewBox: '0 0 16 16', width: '16', height: '16' }, [
+    h('path', { fill: '#519aba', d: 'M3 2a1 1 0 00-1 1v10a1 1 0 001 1h7.5l3.5-3.5V3a1 1 0 00-1-1H3z' }),
+    h('path', { fill: '#fff', opacity: 0.85, d: 'M10.5 2v3.5H14L10.5 2z' }),
+    h('text', { x: '4.5', y: '12', fill: '#fff', 'font-size': '7px', 'font-weight': 'bold', 'font-family': 'monospace' }, 'M')
+  ])
+}}
+
+const FsTreeNode = {
+  name: 'FsTreeNode',
+  props: {
+    node: { type: Object, required: true },
+    selectedFile: { type: String, default: '' },
+    expandedDirs: { type: Object, default: () => new Set() },
+  },
+  emits: ['select-file', 'toggle-dir'],
+  setup(props, { emit }) {
+    const renderNode = (node) => {
+      if (node.type === 'directory') {
+        const isExpanded = props.expandedDirs && props.expandedDirs.has ? props.expandedDirs.has(node.path) : false
+        const children = (node.children || []).map(c => renderNode(c))
+        return h('div', { class: 'kb-fs-dir' }, [
+          h('div', {
+            class: 'kb-fs-dir-name',
+            onClick: () => emit('toggle-dir', node.path),
+          }, [
+            h('span', { class: 'kb-fs-chevron' }, [h(isExpanded ? ChevronDown : ChevronRight)]),
+            h('span', { class: 'kb-fs-folder-icon' }, [h(isExpanded ? FolderOpenIcon : FolderIcon)]),
+            h('span', { class: 'kb-fs-name-text' }, node.name),
+          ]),
+          isExpanded
+            ? h('div', { class: 'kb-fs-dir-children' }, children)
+            : null,
+        ].filter(Boolean))
+      }
+      // 文件
+      return h('div', {
+        class: ['kb-fs-file', { active: props.selectedFile === node.path }],
+        onClick: () => emit('select-file', node),
+      }, [
+        h('span', { class: 'kb-fs-file-icon' }, [h(MdFileIcon)]),
+        h('span', { class: 'kb-fs-file-name' }, node.title || node.name),
+      ])
+    }
+    return () => renderNode(props.node)
+  },
+}
 </script>
 
 <style lang="scss" scoped>
@@ -1069,46 +1221,93 @@ onUnmounted(() => {
 .kb-fs-tree {
   width: 260px; flex-shrink: 0;
   border-right: 1px solid #e4e7ed;
-  background: #fafafa;
+  background: #fff;
   overflow-y: auto;
   display: flex; flex-direction: column;
 }
 
 .kb-fs-tree-header {
   display: flex; justify-content: space-between; align-items: center;
-  padding: 12px 14px;
-  border-bottom: 1px solid #e4e7ed;
-  h4 { margin: 0; font-size: 14px; color: #303133; }
-  .kb-fs-tree-count { font-size: 12px; color: #c0c4cc; }
+  padding: 10px 14px;
+  border-bottom: 1px solid #ebeef5;
+  gap: 8px;
+  h4 { margin: 0; font-size: 13px; color: #303133; white-space: nowrap; flex-shrink: 0; }
+  .kb-fs-tree-count { font-size: 11px; color: #909399; white-space: nowrap; }
 }
 
 .kb-fs-tree-loading { padding: 16px; }
 .kb-fs-tree-empty { padding: 30px 0; }
 
 .kb-fs-tree-list {
-  flex: 1; overflow-y: auto; padding: 6px 0;
+  flex: 1; overflow-y: auto; padding: 4px 0;
 }
 
+// ---- 目录节点 ----
 .kb-fs-dir {
+  user-select: none;
+
   .kb-fs-dir-name {
-    display: flex; align-items: center; gap: 6px;
-    padding: 7px 14px;
-    font-size: 13px; font-weight: 600; color: #303133;
+    display: flex; align-items: center; gap: 4px;
+    padding: 3px 8px 3px 12px;
+    font-size: 13px; color: #303133;
     cursor: pointer;
+    line-height: 22px;
+    border-radius: 3px;
+    transition: background-color 0.1s;
+
     &:hover { background: #f0f2f5; }
   }
-  .kb-fs-dir-children { padding-left: 0; }
+
+  .kb-fs-chevron {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 16px; height: 16px; flex-shrink: 0;
+    color: #9ca3af; transition: transform 0.15s;
+    svg { width: 14px; height: 14px; fill: currentColor; }
+  }
+
+  .kb-fs-folder-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 16px; height: 16px; flex-shrink: 0;
+    margin-right: 2px;
+    svg { width: 16px; height: 16px; }
+  }
+
+  .kb-fs-name-text {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 500;
+  }
+
+  // 子级缩进
+  .kb-fs-dir-children {
+    position: relative;
+    padding-left: 18px;
+  }
 }
 
+// ---- 文件节点（在 .kb-fs-dir-children 内时自动继承缩进）----
 .kb-fs-file {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 14px 6px 28px;
+  display: flex; align-items: center; gap: 4px;
+  padding: 2px 6px 2px 0;
+  margin-left: 22px; // 对齐到父级文字下方
   font-size: 13px; color: #606266;
-  cursor: pointer;
-  transition: background 0.15s;
+  cursor: pointer; user-select: none;
+  line-height: 24px;
+  border-radius: 3px;
+  transition: background-color 0.1s;
+
   &:hover { background: #ecf5ff; }
-  &.active { background: #d9ecff; color: #409eff; font-weight: 600; }
-  .kb-fs-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  &.active { background: #d9ecff; color: #409eff; }
+}
+
+.kb-fs-file-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; flex-shrink: 0;
+  svg { width: 16px; height: 16px; }
+}
+
+.kb-fs-file-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1; min-width: 0;
 }
 
 .kb-fs-content {
@@ -1131,7 +1330,10 @@ onUnmounted(() => {
   .kb-fs-content-title {
     display: flex; align-items: center; gap: 6px;
     font-size: 14px; font-weight: 600; color: #303133;
+    cursor: pointer;
+    &:hover .kb-fs-filename { color: #409eff; text-decoration: underline; }
   }
+  .kb-fs-filename { transition: color .2s; }
   .kb-fs-content-meta { font-size: 12px; color: #c0c4cc; }
 }
 

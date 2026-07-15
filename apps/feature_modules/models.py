@@ -2,11 +2,13 @@ from django.db import models
 from django.utils import timezone
 from apps.users.models import User
 from apps.projects.models import Project
+from apps.versions.models import Version
 
 
 class FeatureModule(models.Model):
     """功能模块模型 - 表示项目下的功能点"""
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='feature_modules', verbose_name='关联项目')
+    versions = models.ManyToManyField(Version, related_name='feature_modules', blank=True, verbose_name='关联版本')
     name = models.CharField(max_length=100, verbose_name='模块名称')
     description = models.TextField(blank=True, verbose_name='模块描述')
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, verbose_name='创建者')

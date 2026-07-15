@@ -205,6 +205,7 @@ class AIModelConfig(models.Model):
         ('writer', '测试用例编写专家'),
         ('writer_vision', '视觉分析专家（截图/图片/PDF）'),
         ('reviewer', '测试评审专家'),
+        ('analyzer', '需求拆解专家'),
         ('browser_use_text', 'Browser Use - 文本模式'),
     ]
 
@@ -247,6 +248,7 @@ class PromptConfig(models.Model):
     PROMPT_CHOICES = [
         ('writer', '用例编写提示词'),
         ('reviewer', '用例评审提示词'),
+        ('analyzer', '需求分析提示词'),
     ]
     
     name = models.CharField(max_length=100, verbose_name='配置名称')
@@ -431,6 +433,10 @@ class TestCaseGenerationTask(models.Model):
     human_feedback = models.TextField(blank=True, verbose_name='人工确认回复')  # 评审后人工对不确定需求的回复/确认
     final_test_cases = models.TextField(blank=True, verbose_name='最终测试用例')
     kb_audit_result = models.TextField(blank=True, verbose_name='知识库审计结果')
+    confirmed_answers = models.TextField(
+        blank=True, verbose_name='需求拆解阶段确认的问答对',
+        help_text='JSON数组: [{question, answer}]，来自精炼时用户确认的不确定项回答，用于生成用例时的上下文注入'
+    )
     review_count = models.IntegerField(default=0, verbose_name='评审次数')  # 0=未评审, 1=首次, 2+=重新评审
     review_updated_at = models.DateTimeField(null=True, blank=True, verbose_name='最后评审时间')
 
@@ -481,6 +487,66 @@ class GeneratedRequirementDoc(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class RequirementAnalysisResult(models.Model):
+    """需求拆解结果历史记录"""
+    title = models.CharField(max_length=300, verbose_name='结果标题')
+    requirement_text = models.TextField(verbose_name='拆解的需求文本', blank=True)
+    result_content = models.TextField(verbose_name='拆解结果（Markdown）')
+    content_preview = models.TextField(verbose_name='内容预览', blank=True)
+    project = models.ForeignKey(
+        Project, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='requirement_analysis_results', verbose_name='关联项目'
+    )
+    req_doc = models.ForeignKey(
+        'GeneratedRequirementDoc', on_delete=models.CASCADE,
+        null=True, blank=True,
+        related_name='analysis_results', verbose_name='关联需求文档'
+    )
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE, verbose_name='创建者')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+
+    class Meta:
+        db_table = 'requirement_analysis_results'
+        verbose_name = '需求拆解结果'
+        verbose_name_plural = '需求拆解结果'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.title
+
+
+class ClarificationQuestion(models.Model):
+    """需求拆解「深度追问清单」条目（关联一条拆解结果历史记录）"""
+    STATUS_CHOICES = [
+        ('pending', '待回复'),
+        ('answered', '已回复'),
+        ('confirmed', '已确认'),
+    ]
+
+    analysis_result = models.ForeignKey(
+        RequirementAnalysisResult, on_delete=models.CASCADE,
+        related_name='clarifications', verbose_name='关联拆解结果'
+    )
+    question = models.TextField(verbose_name='追问问题')
+    answer = models.TextField(verbose_name='人工回复', blank=True)
+    category = models.CharField(max_length=50, verbose_name='分类', default='其他')
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='pending', verbose_name='状态'
+    )
+    order = models.IntegerField(default=0, verbose_name='排序', db_column='order_idx')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'clarification_questions'
+        verbose_name = '深度追问'
+        verbose_name_plural = '深度追问'
+        ordering = ['order', 'id']
+
+    def __str__(self):
+        return f"追问#{self.order}: {self.question[:30]}"
 
 
 class AIModelService:
@@ -639,7 +705,7 @@ class AIModelService:
     @staticmethod
     async def call_openai_compatible_api(
         config: AIModelConfig,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         max_tokens: int = None
     ) -> Dict[str, Any]:
         """
@@ -922,6 +988,36 @@ class AIModelService:
         return instructions.get(mode, instructions['smart'])
 
     @staticmethod
+    def _build_confirmed_answers_context(task: 'TestCaseGenerationTask') -> str:
+        """
+        从 task.confirmed_answers（JSON字符串）构建「需求拆解确认结论」上下文段，
+        注入到用例生成提示词中，让 AI 基于已确认的业务决策生成更精准的用例。
+        """
+        raw = (task.confirmed_answers or '').strip()
+        if not raw:
+            return ''
+        try:
+            import json
+            items = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return ''
+        if not isinstance(items, list) or not items:
+            return ''
+        lines = [
+            '【需求拆解阶段确认结论】',
+            '（以下为用户在需求拆解/精炼环节对不确定项的确认回答，生成测试用例时必须严格遵循）',
+            '',
+        ]
+        for i, item in enumerate(items, 1):
+            q = item.get('question', '').strip()
+            a = item.get('answer', '').strip()
+            if q:
+                lines.append(f'{i}. **问题**：{q}')
+                lines.append(f'   **确认**：{a or "（采纳AI推测）"}')
+                lines.append('')
+        return '\n'.join(lines)
+
+    @staticmethod
     async def generate_test_cases(task: TestCaseGenerationTask) -> str:
         """生成测试用例"""
         writer_prompt = task.writer_prompt_config.content
@@ -930,6 +1026,10 @@ class AIModelService:
         knowledge_context = AIModelService.build_knowledge_context(task)
         knowledge_section = f"{knowledge_context}\n" if knowledge_context else ""
 
+        # 注入需求拆解确认结论上下文
+        confirmed_section = AIModelService._build_confirmed_answers_context(task)
+        confirmed_block = f"{confirmed_section}\n" if confirmed_section else ""
+
         # 根据生成模式构建不同的指令
         mode_instructions = AIModelService._build_generation_instructions(task)
 
@@ -937,6 +1037,7 @@ class AIModelService:
         user_message = (
             f"请深入分析以下需求文档，并设计测试用例。\n\n"
             f"{knowledge_section}"
+            f"{confirmed_block}"
             f"{mode_instructions}\n"
             f"5. **⚠️ 输出顺序要求（必须严格执行）**：\n"
             f"   - **必须按用例编号从小到大的顺序输出**（如：001, 002, 003...或LOGIN_001, LOGIN_002, LOGIN_003...）\n"
@@ -1027,6 +1128,10 @@ class AIModelService:
         knowledge_context = AIModelService.build_knowledge_context(task)
         knowledge_section = f"{knowledge_context}\n" if knowledge_context else ""
 
+        # 注入需求拆解确认结论上下文
+        confirmed_section = AIModelService._build_confirmed_answers_context(task)
+        confirmed_block = f"{confirmed_section}\n" if confirmed_section else ""
+
         # 根据生成模式构建不同的指令
         mode_instructions = AIModelService._build_generation_instructions(task)
 
@@ -1034,6 +1139,7 @@ class AIModelService:
         user_message = (
             f"请深入分析以下需求文档，并设计测试用例。\n\n"
             f"{knowledge_section}"
+            f"{confirmed_block}"
             f"{mode_instructions}\n"
             f"5. **⚠️ 输出顺序要求（必须严格执行）**：\n"
             f"   - **必须按用例编号从小到大的顺序输出**（如：001, 002, 003...或LOGIN_001, LOGIN_002, LOGIN_003...）\n"
@@ -1669,3 +1775,156 @@ class AIModelService:
             logger.error(f"[KB审计] 任务 {task.task_id} 审计失败: {e}")
             traceback.print_exc()
             return ""
+
+    @staticmethod
+    def auto_fill_knowledge_from_confirmations(
+        confirmed_answers: list,
+        project_id: int,
+        user_id: int,
+        model_config=None
+    ) -> dict:
+        """
+        基于需求拆解精炼阶段用户确认的问答对，自动将新知识回填到项目知识库（ProjectKnowledge）。
+        
+        逻辑：
+        1. 获取项目现有知识库条目
+        2. 调用 AI 判断哪些确认回答代表「新知识」（不在现有库中）
+        3. 对每条新知识，创建 ProjectKnowledge 条目（去重：同 project+title 不重复创建）
+        4. 返回 {created: [...], skipped: [...]} 统计
+        
+        Args:
+            confirmed_answers: [{question, answer}, ...] 问答对列表
+            project_id: 项目 ID
+            user_id: 操作用户 ID
+            model_config: 可选的 AI 模型配置（用于判断是否为新知识）
+            
+        Returns:
+            dict: {'created_count': N, 'skipped_count': M, 'entries': [...]}
+        """
+        if not confirmed_answers or not project_id:
+            return {'created_count': 0, 'skipped_count': 0, 'entries': []}
+
+        # 1. 获取现有知识库
+        try:
+            from apps.projects.models import ProjectKnowledge
+            existing = list(ProjectKnowledge.objects.filter(
+                project_id=project_id, is_active=True
+            ).values_list('title', 'content'))
+        except Exception as e:
+            logger.warning(f'[KB自动填充] 获取现有知识库失败: {e}')
+            existing = []
+
+        # 2. 构建现有知识摘要（供 AI 去重参考）
+        existing_summary = ''
+        if existing:
+            lines = ['【项目现有知识库条目】']
+            for title, content in existing:
+                lines.append(f'- {title}: {content[:100]}')
+            existing_summary = '\n'.join(lines) + '\n'
+
+        # 3. 构建 AI 判断请求
+        answers_text = '\n'.join([
+            f'{i+1}. 问题：{a.get("question","")}  确认回答：{a.get("answer","") or "采纳AI推测"}'
+            for i, a in enumerate(confirmed_answers)
+            if a.get('question', '').strip()
+        ])
+
+        if not answers_text.strip():
+            return {'created_count': 0, 'skipped_count': 0, 'entries': []}
+
+        # 尝试调用 AI 判断；若无模型则用简单规则兜底
+        new_items = []
+        if model_config:
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                try:
+                    system_msg = (
+                        "你是一个知识管理专家。你的任务是从用户在需求拆解阶段确认的问答中，"
+                        "筛选出值得沉淀到项目知识库的「新业务知识」。\n\n"
+                        "判断标准：\n"
+                        "- 只筛选**业务决策/规则/约束/约定**类回答（如「统一推荐」「不会影响」「必须XX」）\n"
+                        "- 排除临时性操作说明、个人偏好、与测试无关的闲聊\n"
+                        "- 与已有知识高度相似的不要重复收录\n\n"
+                        "输出格式（严格JSON数组）：\n"
+                        '[{"title":"简短标题(10字内)","category":"constraints|test_focus|notes|terminology|background", "content":"完整内容"}]'
+                    )
+                    user_msg = f"{existing_summary}\n【待分析的确认问答】\n{answers_text}\n\n请只输出JSON数组，不要其他文字。"
+                    result = loop.run_until_complete(
+                        AIModelService.call_openai_compatible_api(model_config, [
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": user_msg}
+                        ], max_tokens=2048)
+                    )
+                    text = result['choices'][0]['message']['content'].strip()
+                    # 提取 JSON
+                    import json
+                    if text.startswith('```'):
+                        text = text.split('\n', 1)[1].rsplit('```', 1)[0]
+                    new_items = json.loads(text)
+                finally:
+                    loop.close()
+            except Exception as e:
+                logger.warning(f'[KB自动填充] AI判断失败，使用简单规则兜底: {e}')
+
+        # 兜底：无AI或AI失败时，简单规则——所有带明确结论的回答都入库
+        if not new_items:
+            for a in confirmed_answers:
+                q = (a.get('question') or '').strip()
+                ans = (a.get('answer') or '').strip()
+                if q and ans and len(ans) > 1:
+                    # 取问题关键词作为标题
+                    title = q[:15].replace('？', '').replace('?', '').strip() or '业务确认'
+                    new_items.append({
+                        'title': title,
+                        'category': 'constraints',
+                        'content': f'**来源问题**：{q}\n**确认结论**：{ans}'
+                    })
+
+        # 4. 创建条目（去重）
+        created_entries = []
+        skipped = 0
+        for item in new_items:
+            if not isinstance(item, dict):
+                continue
+            title = (item.get('title') or '').strip()[:200]
+            category = item.get('category', 'notes')
+            content = (item.get('content') or '').strip()
+            if not title or not content:
+                continue
+
+            # 去重：同一项目下相同标题不重复创建
+            exists = ProjectKnowledge.objects.filter(
+                project_id=project_id, title=title
+            ).exists()
+            if exists:
+                skipped += 1
+                continue
+
+            try:
+                entry = ProjectKnowledge.objects.create(
+                    project_id=project_id,
+                    title=title,
+                    category=category,
+                    content=content,
+                    is_active=True,
+                    sort_order=0,
+                    created_by_id=user_id,
+                )
+                created_entries.append({
+                    'id': entry.id, 'title': title, 'category': category
+                })
+            except Exception as e:
+                logger.warning(f'[KB自动填充] 创建条目失败({title}): {e}')
+                skipped += 1
+
+        result = {
+            'created_count': len(created_entries),
+            'skipped_count': skipped,
+            'entries': created_entries,
+        }
+        logger.info(
+            f'[KB自动填充] 项目{project_id}: 新增{len(created_entries)}条, '
+            f'跳过已存在{skipped}条, 输入{len(confirmed_answers)}条问答'
+        )
+        return result

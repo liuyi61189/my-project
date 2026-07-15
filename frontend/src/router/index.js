@@ -277,16 +277,32 @@ const routes = [
         path: 'notification-logs',
         name: 'UiNotificationLogs',
         component: () => import('@/views/ui-automation/notification/NotificationLogs.vue')
+      }
+    ]
+  },
+  {
+    path: '/app-automation',
+    component: Layout,
+    meta: { requiresAuth: true },
+    children: [
+      {
+        path: '',
+        redirect: 'devices'
       },
       {
-        path: 'app-devices',
+        path: 'devices',
         name: 'AppDevices',
         component: () => import('@/views/ui-automation/app/AppDeviceList.vue')
       },
       {
-        path: 'app-configs',
+        path: 'configs',
         name: 'AppConfigs',
         component: () => import('@/views/ui-automation/app/AppConfigList.vue')
+      },
+      {
+        path: 'test-cases',
+        name: 'AppTestCases',
+        component: () => import('@/views/ui-automation/test-cases/TestCaseManager.vue')
       }
     ]
   },

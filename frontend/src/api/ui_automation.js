@@ -36,6 +36,17 @@ export function ensureUiProject(aiProjectId) {
   })
 }
 
+// 导入 Airtest / Poco 录制脚本，解析为统一步骤并生成 TestCase
+// data 可传 { script, project_id, case_name, app_package }（JSON）
+// 或传 FormData（含 script_file 文件字段）以支持上传 .air/.py 文件
+export function importAirtestScript(data) {
+  return request({
+    url: '/ui-automation/airtest/import/',
+    method: 'post',
+    data
+  })
+}
+
 // 创建UI项目
 export function createUiProject(data) {
   return request({
@@ -736,6 +747,15 @@ export function getTestCaseExecutions(params) {
   })
 }
 
+// 获取单条执行记录的实时状态（用于异步执行轮询）
+export function getTestCaseExecution(id) {
+  return request({
+    url: `/ui-automation/test-case-executions/${id}/`,
+    method: 'get'
+  })
+}
+
+
 // 删除测试用例执行记录
 export function deleteTestCaseExecution(id) {
   return request({
@@ -1196,5 +1216,57 @@ export function deleteAppConfig(id) {
   return request({
     url: `/ui-automation/app-configs/${id}/`,
     method: 'delete'
+  })
+}
+
+// ==================== 页面元素探测 ====================
+
+export function dumpPageElements(data) {
+  return request({
+    url: '/ui-automation/learn-elements/',
+    method: 'post',
+    data
+  })
+}
+
+// ==================== 操作录制（自动生成用例） ====================
+
+export function startRecording(data) {
+  return request({
+    url: '/ui-automation/recording/start/',
+    method: 'post',
+    data
+  })
+}
+
+export function recordingPage(data) {
+  return request({
+    url: '/ui-automation/recording/page/',
+    method: 'post',
+    data
+  })
+}
+
+export function recordAction(data) {
+  return request({
+    url: '/ui-automation/recording/action/',
+    method: 'post',
+    data
+  })
+}
+
+export function stopRecording(data) {
+  return request({
+    url: '/ui-automation/recording/stop/',
+    method: 'post',
+    data
+  })
+}
+
+export function generateRecordingCase(data) {
+  return request({
+    url: '/ui-automation/recording/generate/',
+    method: 'post',
+    data
   })
 }

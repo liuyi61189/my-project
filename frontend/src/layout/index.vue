@@ -145,20 +145,22 @@
               <el-icon><Bell /></el-icon>
               <span>通知列表</span>
             </el-menu-item>
-            <el-sub-menu index="app-automation">
-              <template #title>
-                <el-icon><Iphone /></el-icon>
-                <span>App自动化</span>
-              </template>
-              <el-menu-item index="/ui-automation/app-devices">
-                <el-icon><Monitor /></el-icon>
-                <span>设备管理</span>
-              </el-menu-item>
-              <el-menu-item index="/ui-automation/app-configs">
-                <el-icon><SetUp /></el-icon>
-                <span>应用配置</span>
-              </el-menu-item>
-            </el-sub-menu>
+          </template>
+
+          <!-- App自动化测试模块菜单 -->
+          <template v-else-if="currentModule === 'app-automation'">
+            <el-menu-item index="/app-automation/devices">
+              <el-icon><Iphone /></el-icon>
+              <span>设备管理</span>
+            </el-menu-item>
+            <el-menu-item index="/app-automation/configs">
+              <el-icon><SetUp /></el-icon>
+              <span>应用配置</span>
+            </el-menu-item>
+            <el-menu-item index="/app-automation/test-cases">
+              <el-icon><VideoPlay /></el-icon>
+              <span>用例录制</span>
+            </el-menu-item>
           </template>
 
           <!-- AI 智能模式模块菜单 -->
@@ -277,6 +279,7 @@ const currentModule = computed(() => {
   if (route.path.startsWith('/ai-generation')) return 'ai-generation'
   if (route.path.startsWith('/api-testing')) return 'api-testing'
   if (route.path.startsWith('/ui-automation')) return 'ui-automation'
+  if (route.path.startsWith('/app-automation')) return 'app-automation'
   if (route.path.startsWith('/ai-intelligent-mode')) return 'ai-intelligent-mode'
   if (route.path.startsWith('/configuration')) return 'configuration'
   return ''
@@ -287,6 +290,7 @@ const moduleName = computed(() => {
     'ai-generation': 'AI用例生成',
     'api-testing': '接口测试',
     'ui-automation': 'UI自动化测试',
+    'app-automation': 'App自动化测试',
     'ai-intelligent-mode': 'AI 智能模式',
     'configuration': '配置中心'
   }
@@ -333,9 +337,10 @@ const breadcrumbTitle = computed(() => {
     '/ui-automation/scheduled-tasks': '定时任务',
     '/ui-automation/notification-logs': '通知列表',
     
-    // App自动化
-    '/ui-automation/app-devices': '设备管理',
-    '/ui-automation/app-configs': '应用配置',
+    // App自动化测试
+    '/app-automation/devices': '设备管理',
+    '/app-automation/configs': '应用配置',
+    '/app-automation/test-cases': '用例录制',
     
     // AI 智能模式
     '/ai-intelligent-mode/testing': 'AI 智能测试',

@@ -134,8 +134,16 @@
         <el-form-item label="UDID" prop="udid">
           <el-input v-model="form.udid" placeholder="设备唯一标识" />
         </el-form-item>
-        <el-form-item label="Appium Server" prop="appium_server_url">
-          <el-input v-model="form.appium_server_url" placeholder="http://localhost:4723" />
+        <el-form-item label="服务地址" prop="appium_server_url">
+          <el-input
+            v-model="form.appium_server_url"
+            :placeholder="form.platform === 'ios' ? 'http://host:8100 (WDA地址)' : 'http://localhost:4723'"
+          />
+          <div class="form-hint">
+            {{ form.platform === 'ios'
+              ? 'iOS(Airtest)填 WDA 代理地址，如 http://host.docker.internal:8100'
+              : 'Android/iOS(Appium)填 Appium Server 地址' }}
+          </div>
         </el-form-item>
         <el-form-item label="分辨率" prop="resolution">
           <el-input v-model="form.resolution" placeholder="如：1080x2400" />
@@ -402,5 +410,12 @@ onMounted(() => {
 
 .text-muted {
   color: #c0c4cc;
+}
+
+.form-hint {
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.4;
+  margin-top: 4px;
 }
 </style>

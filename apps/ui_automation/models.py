@@ -609,15 +609,25 @@ class TestCaseStep(models.Model):
     """测试用例步骤模型"""
     ACTION_TYPE_CHOICES = [
         ('click', '点击'),
+        ('tap', '轻触'),
+        ('double_tap', '双击'),
+        ('long_press', '长按'),
         ('fill', '输入文本'),
+        ('input', '输入'),
+        ('clear', '清空'),
         ('getText', '获取文本'),
         ('waitFor', '等待元素'),
         ('hover', '悬停'),
         ('scroll', '滚动'),
+        ('swipe', '滑动'),
         ('screenshot', '截图'),
         ('assert', '断言'),
         ('wait', '等待'),
         ('switchTab', '切换标签页'),
+        ('launch_app', '启动应用'),
+        ('close_app', '关闭应用'),
+        ('back', '返回'),
+        ('home', '主页'),
     ]
 
     ASSERT_TYPE_CHOICES = [
@@ -637,6 +647,9 @@ class TestCaseStep(models.Model):
     assert_type = models.CharField(max_length=20, choices=ASSERT_TYPE_CHOICES, blank=True, verbose_name='断言类型')
     assert_value = models.TextField(blank=True, verbose_name='断言期望值')
     description = models.TextField(blank=True, verbose_name='步骤描述')
+    # 录制时点击的屏幕坐标（用于坐标回放，比 locator 更稳定）
+    center_x = models.IntegerField(null=True, blank=True, verbose_name='点击横坐标(录制坐标)')
+    center_y = models.IntegerField(null=True, blank=True, verbose_name='点击纵坐标(录制坐标)')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
 
     class Meta:
@@ -680,6 +693,7 @@ class TestCaseExecution(models.Model):
     browser = models.CharField(max_length=50, default='chrome', verbose_name='浏览器')
     headless = models.BooleanField(default=False, verbose_name='无头模式')
     execution_logs = models.TextField(blank=True, verbose_name='执行日志')
+    step_results = models.JSONField(default=list, blank=True, verbose_name='步骤执行结果')
     error_message = models.TextField(null=True, blank=True, verbose_name='错误信息')
     screenshots = models.JSONField(default=list, blank=True, verbose_name='截图列表')
     execution_time = models.FloatField(null=True, blank=True, verbose_name='执行时长(秒)')

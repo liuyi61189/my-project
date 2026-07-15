@@ -368,7 +368,7 @@ const handleSubmit = async () => {
 
         await api.put(`/testcases/${route.params.id}/`, submitData)
         ElMessage.success('测试用例修改成功')
-        router.replace(`/ai-generation/testcases/${route.params.id}`)
+        router.replace({ path: `/ai-generation/testcases/${route.params.id}`, query: { ...route.query } })
       } catch (error) {
         ElMessage.error('测试用例修改失败')
         console.error('提交错误:', error)

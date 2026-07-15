@@ -525,15 +525,26 @@ class CodeGenerationSerializer(serializers.Serializer):
         return data
 
 
+class TestCaseStepElementSerializer(serializers.ModelSerializer):
+    """步骤关联元素的轻量序列化器（供 TestCaseStep 嵌套回显）"""
+    locator_strategy = LocatorStrategySerializer(read_only=True)
+
+    class Meta:
+        model = Element
+        fields = ['id', 'name', 'locator_value', 'locator_strategy', 'element_type']
+
+
 class TestCaseStepSerializer(serializers.ModelSerializer):
     """测试用例步骤序列化器"""
+    element = TestCaseStepElementSerializer(read_only=True)
+    element_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
     element_name = serializers.CharField(source='element.name', read_only=True)
     element_locator = serializers.CharField(source='element.locator_value', read_only=True)
 
     class Meta:
         model = TestCaseStep
         fields = [
-            'id', 'step_number', 'action_type', 'element', 'element_name', 'element_locator',
+            'id', 'step_number', 'action_type', 'element', 'element_id', 'element_name', 'element_locator',
             'input_value', 'wait_time', 'assert_type', 'assert_value', 'description', 'created_at'
         ]
 
@@ -569,7 +580,7 @@ class TestCaseExecutionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'test_case', 'test_case_name', 'project', 'project_name',
             'test_suite', 'test_suite_name', 'execution_source', 'status',
-            'engine', 'browser', 'headless', 'execution_logs', 'error_message',
+            'engine', 'browser', 'headless',             'execution_logs', 'step_results', 'error_message',
             'screenshots', 'execution_time', 'started_at', 'finished_at',
             'created_by', 'created_by_name', 'created_at'
         ]

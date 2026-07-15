@@ -12,10 +12,6 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RemoveField(
-            model_name='testcase',
-            name='test_points',
-        ),
         migrations.AddField(
             model_name='testcase',
             name='test_point',

@@ -15,6 +15,7 @@
         <span v-if="neighborIds.length > 0" class="nav-hint">{{ currentIndex + 1 }} / {{ neighborIds.length }}</span>
         <el-button type="primary" @click="editTestCase">编辑</el-button>
         <el-button type="success" @click="openExecuteDialog">执行</el-button>
+        <el-button type="danger" @click="confirmDelete">删除</el-button>
       </div>
     </div>
     
@@ -142,7 +143,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, Close } from '@element-plus/icons-vue'
 import api from '@/utils/api'
 import dayjs from 'dayjs'
@@ -213,24 +214,18 @@ const setNeighborData = (items) => {
 
 // 按用例自身的 project+version（带 fallback）拉取导航列表
 const loadNeighborByCaseContext = async () => {
-  const projectId = testcase.value?.project?.id
-  const versions = testcase.value?.versions || []
-  const versionId = versions.length > 0 ? versions[0].id : null
-  const buildParams = (proj, ver) => {
-    const p = { page_size: 1000, ordering: '-created_at' }
-    if (proj) p.project = proj
-    if (ver) p.version = ver
-    return p
-  }
   const currentId = Number(route.params.id)
-  let items = await fetchNeighborPages(buildParams(projectId, versionId))
+  // 没有筛选条件时：先全量拉取，与列表页保持一致
+  let items = await fetchNeighborPages({ page_size: 1000, ordering: '-created_at' })
   if (items.length > 0 && items.map(t => t.id).indexOf(currentId) === -1) {
-    // 当前用例不在 project+version 结果中，去掉 version 重试
-    items = await fetchNeighborPages(buildParams(projectId, null))
-  }
-  if (items.length > 0 && items.map(t => t.id).indexOf(currentId) === -1) {
-    // 仍不在，则完全不过滤
-    items = await fetchNeighborPages({ page_size: 1000, ordering: '-created_at' })
+    // 极端情况：当前用例不在全量结果中（理论上不会），回退到 project+version
+    const projectId = testcase.value?.project?.id
+    const versions = testcase.value?.versions || []
+    const versionId = versions.length > 0 ? versions[0].id : null
+    const p = { page_size: 1000, ordering: '-created_at' }
+    if (projectId) p.project = projectId
+    if (versionId) p.version = versionId
+    items = await fetchNeighborPages(p)
   }
   setNeighborData(items)
 }
@@ -328,8 +323,38 @@ const goToNeighbor = (delta) => {
   router.replace({ path: `/ai-generation/testcases/${targetId}`, query: { ...route.query } })
 }
 
+const confirmDelete = () => {
+  ElMessageBox.confirm('确定要删除这个测试用例吗？此操作不可恢复。', '确认删除', {
+    confirmButtonText: '删除',
+    cancelButtonText: '取消',
+    type: 'warning',
+    confirmButtonClass: 'el-button--danger',
+  }).then(() => handleDelete())
+}
+
+const handleDelete = async () => {
+  const currentId = route.params.id
+  try {
+    await api.delete(`/testcases/${currentId}/`)
+    ElMessage.success('用例已删除')
+    // 从邻居列表中移除当前 ID
+    const idx = neighborIds.value.indexOf(Number(currentId))
+    if (idx > -1) neighborIds.value.splice(idx, 1)
+    // 跳转：优先下一条，没有则上一条，都没有回列表
+    if (idx < neighborIds.value.length) {
+      router.replace({ path: `/ai-generation/testcases/${neighborIds.value[idx]}`, query: { ...route.query } })
+    } else if (neighborIds.value.length > 0) {
+      router.replace({ path: `/ai-generation/testcases/${neighborIds.value[neighborIds.value.length - 1]}`, query: { ...route.query } })
+    } else {
+      router.replace({ path: '/ai-generation/testcases', query: { ...route.query } })
+    }
+  } catch (error) {
+    ElMessage.error('删除失败: ' + (error.response?.data?.detail || error.message))
+  }
+}
+
 const editTestCase = () => {
-  router.push(`/ai-generation/testcases/${route.params.id}/edit`)
+  router.push({ path: `/ai-generation/testcases/${route.params.id}/edit`, query: { ...route.query } })
 }
 
 const getPriorityText = (priority) => {

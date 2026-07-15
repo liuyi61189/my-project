@@ -40,10 +40,20 @@
 
         <div class="filter-group">
           <label>功能模块:</label>
-          <select v-model="selectedFeatureModule" @change="loadTasks" class="filter-select" :disabled="!selectedProject">
+          <select v-model="selectedFeatureModule" @change="onFeatureModuleChange" class="filter-select" :disabled="!selectedProject && !selectedVersion">
             <option value="">全部模块</option>
             <option v-for="fm in filteredFeatureModules" :key="fm.id" :value="fm.id">
               {{ fm.name }}
+            </option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label>测试点:</label>
+          <select v-model="selectedTestPoint" @change="loadTasks" class="filter-select" :disabled="!selectedFeatureModule">
+            <option value="">全部测试点</option>
+            <option v-for="tp in filteredTestPoints" :key="tp.id" :value="tp.id">
+              {{ tp.name }}
             </option>
           </select>
         </div>
@@ -504,6 +514,7 @@ export default {
       selectedProject: '',
       selectedVersion: '',
       selectedFeatureModule: '',
+      selectedTestPoint: '',
       selectedTaskDetail: null,
       showAdoptModal: false,
       isAdopting: false,
@@ -512,6 +523,7 @@ export default {
       allVersions: [], // 存储所有版本列表
       allFeatureModules: [], // 存储所有功能模块列表
       availableFeatureModules: [], // 当前项目的功能模块
+      allTestPoints: [], // 存储所有测试点列表
       // 快速创建功能模块
       showQuickCreateFeatureModule: false,
       quickFeatureModuleSaving: false,
@@ -609,7 +621,19 @@ export default {
 
     // 根据选中项目/版本过滤的功能模块列表（用于筛选区）
     filteredFeatureModules() {
-      // 优先按选中的项目过滤
+      // 如果选了版本，优先按版本的所属项目过滤（更精确）
+      if (this.selectedVersion) {
+        const version = this.allVersions.find(v => v.id === Number(this.selectedVersion))
+        if (version && version.projects && version.projects.length > 0) {
+          // 版本可能关联多个项目，取所有项目ID
+          const versionProjectIds = version.projects.map(p => p.id)
+          return this.allFeatureModules.filter(fm => {
+            const fpid = fm.project ? fm.project.id : fm.project_id
+            return versionProjectIds.includes(fpid)
+          })
+        }
+      }
+      // 没有版本但选了项目 → 按项目过滤
       if (this.selectedProject) {
         const pid = Number(this.selectedProject)
         return this.allFeatureModules.filter(fm => {
@@ -617,20 +641,16 @@ export default {
           return fpid === pid
         })
       }
-      // 其次按选中的版本过滤
-      if (this.selectedVersion) {
-        const version = this.allVersions.find(v => v.id === Number(this.selectedVersion))
-        if (!version || !version.projects) {
-          return this.allFeatureModules
-        }
-        const projectIds = version.projects.map(p => p.id)
-        return this.allFeatureModules.filter(fm => {
-          const pid = fm.project ? fm.project.id : fm.project_id
-          return projectIds.includes(pid)
-        })
-      }
-      // 未选项目和版本 → 不显示任何模块（必须选项目后才可选模块）
       return []
+    },
+
+    // 根据选中功能模块过滤的测试点列表
+    filteredTestPoints() {
+      if (!this.selectedFeatureModule) return []
+      return this.allTestPoints.filter(tp => {
+        const tfm = tp.feature_module ? tp.feature_module.id : tp.feature_module_id
+        return tfm === Number(this.selectedFeatureModule)
+      })
     }
   },
   
@@ -639,6 +659,7 @@ export default {
     this.fetchProjects()
     this.fetchAllVersions()
     this.fetchAllFeatureModules()
+    this.fetchAllTestPoints()
   },
   
   methods: {
@@ -663,6 +684,9 @@ export default {
         }
         if (this.selectedFeatureModule) {
           params.append('feature_module', this.selectedFeatureModule)
+        }
+        if (this.selectedTestPoint) {
+          params.append('test_point', this.selectedTestPoint)
         }
         
         if (params.toString()) {
@@ -835,6 +859,9 @@ export default {
         }
         if (this.selectedFeatureModule) {
           params.append('feature_module', this.selectedFeatureModule)
+        }
+        if (this.selectedTestPoint) {
+          params.append('test_point', this.selectedTestPoint)
         }
         
         url += '?' + params.toString()
@@ -1047,12 +1074,23 @@ export default {
     onProjectFilterChange() {
       this.selectedVersion = ''
       this.selectedFeatureModule = ''
+      this.selectedTestPoint = ''
       this.loadTasks()
     },
 
     // 版本筛选变化时清空功能模块（因为模块需要匹配版本的归属项目）
     onVersionFilterChange() {
       this.selectedFeatureModule = ''
+      this.selectedTestPoint = ''
+      this.loadTasks()
+    },
+
+    onFeatureModuleChange() {
+      this.selectedTestPoint = ''
+      // 加载该模块下的测试点（用于下拉）
+      if (this.selectedFeatureModule) {
+        this.fetchTestPoints(this.selectedFeatureModule)
+      }
       this.loadTasks()
     },
 
@@ -1085,6 +1123,28 @@ export default {
       } catch (error) {
         console.error('获取所有功能模块列表失败:', error)
         this.allFeatureModules = []
+      }
+    },
+
+    // 获取所有测试点（用于筛选下拉）
+    async fetchAllTestPoints() {
+      try {
+        const response = await api.get('/feature-modules/test-points/')
+        this.allTestPoints = response.data.results || response.data || []
+      } catch (error) {
+        console.error('获取测试点列表失败:', error)
+        this.allTestPoints = []
+      }
+    },
+
+    // 获取指定功能模块下的测试点
+    async fetchTestPoints(moduleId) {
+      if (!moduleId) return
+      try {
+        const response = await api.get(`/feature-modules/modules/${moduleId}/test-points/`)
+        this.allTestPoints = response.data || []
+      } catch (error) {
+        console.error('获取模块测试点失败:', error)
       }
     },
 

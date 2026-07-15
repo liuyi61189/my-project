@@ -16,6 +16,8 @@ import re
 import random
 import time
 
+from .smart_locator import smart_match_locator, parse_swipe_pattern, get_wheel_coords, dump_page_elements
+
 from .models import (
     UiProject, LocatorStrategy, Element, TestScript, TestSuite,
     TestSuiteScript, TestExecution, Screenshot,
@@ -1338,17 +1340,67 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                     for i, line in enumerate(l for l in src.steps.splitlines() if l.strip())
                 ]
 
+            # 预创建高频元素（确认按钮等），供后续步骤复用
+            def get_sure_btn():
+                return Element.objects.get_or_create(
+                    project=ui_project,
+                    name='确认按钮',
+                    defaults={
+                        'locator_strategy': default_strategy,
+                        'locator_value': 'com.youloft.calendar:id/dc_sureBtn',
+                        'element_type': 'BUTTON',
+                    }
+                )[0]
+
             step_num = 1
+
+            # 第一步：启动 App
+            TestCaseStep.objects.create(
+                test_case=ui_case, step_number=step_num,
+                action_type='launch_app',
+                description='启动万年历应用',
+                wait_time=2000,
+            )
+            step_num += 1
+
             for s in step_objs:
                 action_text = getattr(s, 'action', '') or ''
                 expected_text = getattr(s, 'expected', '') or ''
                 atype = infer_appium_action_type(action_text)
 
+                # 检查是否是"选中N个月/年后"的滑动模式
+                swipe_pattern = parse_swipe_pattern(action_text)
+                if swipe_pattern:
+                    wheel_type, times = swipe_pattern
+                    coords = get_wheel_coords().get(wheel_type, (585, 2228, 585, 2078))
+                    swipe_input = f"{coords[0]},{coords[1]},{coords[2]},{coords[3]}"
+                    wheel_label = {"month":"月","year":"年","day":"日"}.get(wheel_type, "月")
+                    for i in range(times):
+                        TestCaseStep.objects.create(
+                            test_case=ui_case, step_number=step_num,
+                            action_type='swipe',
+                            description=f'在{wheel_label}滚轮上滑动1个{wheel_label}({i+1}/{times})',
+                            input_value=swipe_input,
+                            wait_time=500,
+                        )
+                        step_num += 1
+                    # 滑动完成后自动插入确认按钮
+                    sure_btn = get_sure_btn()
+                    TestCaseStep.objects.create(
+                        test_case=ui_case, step_number=step_num,
+                        action_type='click', element=sure_btn,
+                        description='点击确认按钮，关闭选择器',
+                    )
+                    step_num += 1
+                    # 不再生成原来的 click 步骤（swipe 模式已包含确认）
+                    continue
+
+                matched_strategy, matched_value = smart_match_locator(action_text)
                 elem = Element.objects.create(
                     project=ui_project,
                     name=(action_text[:50] or f'步骤{step_num}')[:50],
-                    locator_strategy=default_strategy,
-                    locator_value='TODO_待补充控件定位器',
+                    locator_strategy=LocatorStrategy.objects.filter(name=matched_strategy.upper()).first() if matched_strategy else default_strategy,
+                    locator_value=matched_value if matched_value else 'TODO_待补充控件定位器',
                     element_type=('INPUT' if atype in ('fill', 'input') else 'TEXT' if atype == 'assert' else 'BUTTON'),
                     description=action_text
                 )
@@ -1367,11 +1419,12 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
             # 用例级预期结果追加为断言步骤
             if src.expected_result:
+                matched_strategy2, matched_value2 = smart_match_locator(src.expected_result or src.title)
                 elem = Element.objects.create(
                     project=ui_project,
                     name=f'断言_{src.title[:30]}'[:50],
-                    locator_strategy=default_strategy,
-                    locator_value='TODO_待补充控件定位器',
+                    locator_strategy=LocatorStrategy.objects.filter(name=matched_strategy2.upper()).first() if matched_strategy2 else default_strategy,
+                    locator_value=matched_value2 if matched_value2 else 'TODO_待补充控件定位器',
                     element_type='TEXT',
                     description='用例预期结果断言'
                 )
@@ -1416,6 +1469,41 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 created_by=request.user,
                 started_at=timezone.now()
             )
+
+            # ========== 所有引擎共用的步骤数据（提前构建，避免各分支重复） ==========
+            test_steps = list(test_case.steps.all().order_by('step_number'))
+            steps_data = []
+            for step in test_steps:
+                step_data = {
+                    'step': step,
+                    'action_type': step.action_type,
+                    'description': step.description,
+                    'input_value': step.input_value,
+                    'wait_time': step.wait_time,
+                    'assert_type': step.assert_type,
+                    'assert_value': step.assert_value,
+                    'center_x': step.center_x,
+                    'center_y': step.center_y,
+                }
+                if step.element:
+                    step_data['element_data'] = {
+                        'locator_strategy': step.element.locator_strategy.name if step.element.locator_strategy else ('css' if engine_type != 'appium' else 'xpath'),
+                        'locator_value': step.element.locator_value,
+                        'name': step.element.name,
+                        'element_id': step.element.id,
+                        'wait_timeout': getattr(step.element, 'wait_timeout', None),
+                        'force_action': getattr(step.element, 'force_action', False),
+                    }
+                else:
+                    step_data['element_data'] = None
+                steps_data.append(step_data)
+
+            # 共享结果容器（Appium / Playwright / Selenium 各分支共用）
+            step_results = []
+            execution_logs = []
+            screenshots = []
+            detailed_errors = []
+            execution_result = {'status': 'passed', 'error_message': None}
 
             # 根据引擎类型导入对应的执行引擎
             if engine_type == 'selenium':
@@ -1509,6 +1597,18 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                             engine_config.update(device.capabilities)
 
                         app_engine = AppiumTestEngine(**engine_config)
+                        # 连接前清理设备端残留的 UiAutomator2 进程
+                        if device.udid:
+                            import subprocess as _sp
+                            try:
+                                _sp.run(
+                                    ['adb', '-s', device.udid, 'shell', 'am', 'force-stop',
+                                     'io.appium.uiautomator2.server'],
+                                    capture_output=True, timeout=5,
+                                )
+                                logger.info(f"执行前已清理设备 {device.udid} 上的残留 UiAutomator2 进程")
+                            except Exception:
+                                pass
                         app_engine.connect()
 
                         execution_logs.append(f"========== Appium 引擎初始化 ==========")
@@ -1526,6 +1626,20 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                                 execution_logs.append(f"--- 步骤 {i}/{len(steps_data)} ---")
                                 execution_logs.append(f"操作: {step_info['action_type']} - {step_info['description']}")
 
+                                # element 字段兼容：录制存储可能是 'element' 或 'element_data'
+                                el = step_info.get('element_data') or step_info.get('element')
+                                # 自动捕获步骤的坐标可能在顶层
+                                if el is None or (not el.get('center_x') and not el.get('center_y')):
+                                    cx = step_info.get('center_x')
+                                    cy = step_info.get('center_y')
+                                    if cx is not None and cy is not None:
+                                        el = {'center_x': cx, 'center_y': cy,
+                                              'locator_strategy': 'coordinate',
+                                              'value': f'{cx},{cy}',
+                                              'name': f'坐标({cx},{cy})'}
+                                    elif el is None:
+                                        el = {}
+
                                 step_data = {
                                     'step_number': i,
                                     'action_type': step_info['action_type'],
@@ -1534,7 +1648,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                                     'wait_time': step_info.get('wait_time', 0),
                                     'assert_type': step_info.get('assert_type', ''),
                                     'assert_value': step_info.get('assert_value', ''),
-                                    'element': step_info.get('element_data')
+                                    'element': el
                                 }
 
                                 result = app_engine.execute_step(step_data)
@@ -1601,6 +1715,169 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                     'device': device.name,
                     'app_config': app_config.name
                 })
+            elif engine_type == 'airtest':
+                # Airtest 引擎：使用 Airtest 直接连接设备执行 App 自动化测试
+                from .airtest_engine import AirtestRecordingEngine
+                import threading as _thread_mod
+
+                device_id = request.data.get('device_id')
+                app_config_id = request.data.get('app_config_id')
+
+                if not device_id or not app_config_id:
+                    execution.status = 'failed'
+                    execution.error_message = '使用 Airtest 引擎时必须选择设备和应用配置'
+                    execution.execution_logs = '使用 Airtest 引擎时必须选择设备和应用配置'
+                    execution.finished_at = timezone.now()
+                    execution.save()
+                    return Response({
+                        'success': False,
+                        'logs': execution.execution_logs,
+                        'screenshots': [],
+                        'execution_time': 0,
+                        'errors': [{
+                            'message': '缺少必要参数',
+                            'details': '使用 Airtest 引擎时必须选择设备和应用配置',
+                            'step_number': None,
+                            'action_type': '参数检查',
+                            'element': '',
+                            'description': '执行前参数检查'
+                        }]
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                try:
+                    device = AppDevice.objects.get(id=device_id)
+                    app_config = AppConfig.objects.get(id=app_config_id)
+                except AppDevice.DoesNotExist:
+                    execution.status = 'failed'
+                    execution.error_message = f'设备不存在 (ID: {device_id})'
+                    execution.finished_at = timezone.now()
+                    execution.save()
+                    return Response({'success': False, 'logs': execution.error_message}, status=status.HTTP_400_BAD_REQUEST)
+                except AppConfig.DoesNotExist:
+                    execution.status = 'failed'
+                    execution.error_message = f'应用配置不存在 (ID: {app_config_id})'
+                    execution.finished_at = timezone.now()
+                    execution.save()
+                    return Response({'success': False, 'logs': execution.error_message}, status=status.HTTP_400_BAD_REQUEST)
+
+                def run_airtest_test():
+                    try:
+                        at_engine = AirtestRecordingEngine(
+                            serial=device.udid,
+                            platform=device.platform,
+                            app_package=app_config.package_name,
+                            wda_url=device.appium_server_url,
+                        )
+                        at_engine.connect()
+
+                        # 启动被测应用
+                        try:
+                            at_engine.activate_app(app_config.package_name)
+                        except Exception:
+                            pass
+                        time.sleep(1)
+
+                        execution_logs.append("========== Airtest 引擎初始化 ==========")
+                        execution_logs.append(f"✓ Airtest 连接成功: {device.platform} 设备 {device.name}")
+                        execution_logs.append(f"  应用: {app_config.name}")
+                        execution_logs.append(f"  设备UDID: {device.udid}")
+                        execution_logs.append("")
+
+                        if steps_data:
+                            execution_logs.append("========== 执行测试步骤 ==========")
+                            execution_logs.append(f"共有 {len(steps_data)} 个步骤需要执行")
+                            execution_logs.append("")
+
+                            for i, step_info in enumerate(steps_data, 1):
+                                execution_logs.append(f"--- 步骤 {i}/{len(steps_data)} ---")
+                                execution_logs.append(f"操作: {step_info['action_type']} - {step_info['description']}")
+
+                                # element 字段兼容：录制存储可能是 'element' 或 'element_data'
+                                el = step_info.get('element_data') or step_info.get('element')
+                                # 自动捕获步骤的坐标可能在顶层
+                                if el is None or (not el.get('center_x') and not el.get('center_y')):
+                                    cx = step_info.get('center_x')
+                                    cy = step_info.get('center_y')
+                                    if cx is not None and cy is not None:
+                                        el = {'center_x': cx, 'center_y': cy,
+                                              'locator_strategy': 'coordinate',
+                                              'value': f'{cx},{cy}',
+                                              'name': f'坐标({cx},{cy})'}
+                                    elif el is None:
+                                        el = {}
+
+                                step_data = {
+                                    'step_number': i,
+                                    'action_type': step_info['action_type'],
+                                    'description': step_info['description'],
+                                    'input_value': step_info.get('input_value', ''),
+                                    'wait_time': step_info.get('wait_time', 0),
+                                    'assert_type': step_info.get('assert_type', ''),
+                                    'assert_value': step_info.get('assert_value', ''),
+                                    'element': el
+                                }
+
+                                result = at_engine.execute_step(step_data)
+                                step_result_entry = {
+                                    'step_number': i,
+                                    'action_type': step_info['action_type'],
+                                    'description': step_info['description'],
+                                    'success': result.get('success', False),
+                                    'error': result.get('error', ''),
+                                    'screenshot': result.get('screenshot', None)
+                                }
+                                step_results.append(step_result_entry)
+
+                                if result.get('success'):
+                                    execution_logs.append(f"  ✓ 步骤 {i} 执行成功")
+                                else:
+                                    execution_logs.append(f"  ✗ 步骤 {i} 执行失败: {result.get('error', '')}")
+                                    if result.get('screenshot'):
+                                        screenshots.append(result['screenshot'])
+                                    execution_result['status'] = 'failed'
+                                    detailed_errors.append({
+                                        'step_number': i,
+                                        'action_type': step_info['action_type'],
+                                        'element': step_info.get('element_data', {}).get('name', '') if step_info.get('element_data') else '',
+                                        'message': f'步骤 {i} 执行失败',
+                                        'details': result.get('error', ''),
+                                        'description': step_info['description']
+                                    })
+                                    break
+
+                                execution_logs.append("")
+
+                        at_engine.disconnect()
+                        execution_logs.append("========== 测试执行完成 ==========")
+
+                        # 更新执行记录
+                        execution.execution_logs = '\n'.join(execution_logs)
+                        execution.screenshots = screenshots
+                        execution.step_results = step_results
+                        execution.status = execution_result['status']
+                        execution.error_message = execution_result.get('error_message', '')
+                        execution.finished_at = timezone.now()
+                        execution.save()
+
+                    except Exception as e:
+                        error_msg = f"Airtest 执行异常: {str(e)}"
+                        execution_logs.append(f"✗ {error_msg}")
+                        execution.execution_logs = '\n'.join(execution_logs)
+                        execution.status = 'failed'
+                        execution.error_message = error_msg
+                        execution.finished_at = timezone.now()
+                        execution.save()
+
+                _thread_mod.Thread(target=run_airtest_test, daemon=True).start()
+
+                return Response({
+                    'success': True,
+                    'message': 'Airtest 自动化测试已启动',
+                    'execution_id': execution.id,
+                    'engine': 'airtest',
+                    'device': device.name,
+                    'app_config': app_config.name
+                })
             else:
                 import asyncio
                 import threading
@@ -1608,57 +1885,18 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
             start_time = time.time()
 
-            # 获取测试用例的所有步骤
-            test_steps = list(test_case.steps.all().order_by('step_number'))
-
-            # 预先获取所有步骤的数据,避免在异步上下文中访问ORM
-            steps_data = []
-            for step in test_steps:
-                step_data = {
-                    'step': step,
-                    'action_type': step.action_type,
-                    'description': step.description,
-                    'input_value': step.input_value,
-                    'wait_time': step.wait_time,
-                    'assert_type': step.assert_type,
-                    'assert_value': step.assert_value,
-                }
-
-                # 获取元素数据
-                if step.element:
-                    step_data['element_data'] = {
-                        'locator_strategy': step.element.locator_strategy.name if step.element.locator_strategy else 'css',
-                        'locator_value': step.element.locator_value,
-                        'name': step.element.name,
-                        'wait_timeout': step.element.wait_timeout,  # 添加元素的等待超时设置（秒）
-                        'force_action': step.element.force_action  # 添加强制操作选项
-                    }
-                else:
-                    step_data['element_data'] = None
-
-                steps_data.append(step_data)
-
-            # 存储步骤执行结果（用于JSON格式的execution_logs）
-            step_results = []
-
-            # 生成执行日志（保留文本格式用于调试）
-            execution_logs = []
-            execution_logs.append(f"测试用例 '{test_case.name}' 开始执行")
-            execution_logs.append(f"执行时间: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            execution_logs.append(f"执行引擎: {engine_type.upper()}")
-            execution_logs.append(f"浏览器: {request.data.get('browser', 'chrome').capitalize()}")
-            headless_mode = request.data.get('headless', False)
-            mode_text = "无头模式" if headless_mode else "有头模式"
-            execution_logs.append(f"执行模式: {mode_text}")
-            execution_logs.append(f"执行用户: {request.user.username}")
-            execution_logs.append(f"项目基础URL: {test_case.project.base_url}")
-            execution_logs.append("")
-
-            # 截图列表
-            screenshots = []
-            # 详细错误信息列表
-            detailed_errors = []
-            execution_result = {'status': 'passed', 'error_message': None}
+            # 执行日志头部（Playwright/Selenium 专用，Appium 在闭包内自己写）
+            if engine_type != 'appium':
+                execution_logs.append(f"测试用例 '{test_case.name}' 开始执行")
+                execution_logs.append(f"执行时间: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                execution_logs.append(f"执行引擎: {engine_type.upper()}")
+                execution_logs.append(f"浏览器: {request.data.get('browser', 'chrome').capitalize()}")
+                headless_mode = request.data.get('headless', False)
+                mode_text = "无头模式" if headless_mode else "有头模式"
+                execution_logs.append(f"执行模式: {mode_text}")
+                execution_logs.append(f"执行用户: {request.user.username}")
+                execution_logs.append(f"项目基础URL: {test_case.project.base_url}")
+                execution_logs.append("")
 
             # 根据引擎类型选择执行方式
             if engine_type == 'selenium':
@@ -1726,8 +1964,28 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                                 description = step_info['description']
                                 element_data = step_info['element_data']
 
-                                action_choices_dict = dict(TestCaseStep.ACTION_TYPE_CHOICES)
-                                action_type_text = action_choices_dict.get(action_type, action_type)
+                                action_type_text = {
+                                    'click': '点击',
+                                    'tap': '轻触',
+                                    'double_tap': '双击',
+                                    'long_press': '长按',
+                                    'fill': '输入文本',
+                                    'input': '输入',
+                                    'clear': '清空',
+                                    'getText': '获取文本',
+                                    'waitFor': '等待元素',
+                                    'hover': '悬停',
+                                    'scroll': '滚动',
+                                    'swipe': '滑动',
+                                    'screenshot': '截图',
+                                    'assert': '断言',
+                                    'wait': '等待',
+                                    'switchTab': '切换标签页',
+                                    'launch_app': '启动应用',
+                                    'close_app': '关闭应用',
+                                    'back': '返回',
+                                    'home': '主页'
+                                }.get(action_type, action_type)
                                 execution_logs.append(f"  操作: {action_type_text}")
 
                                 if description:
@@ -2090,6 +2348,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
             # 保存步骤执行结果为JSON格式
             execution.execution_logs = json.dumps(step_results, ensure_ascii=False)
+            execution.step_results = step_results
             execution.execution_time = total_time
             execution.finished_at = timezone.now()
             execution.screenshots = screenshots
@@ -2659,6 +2918,7 @@ class UiScheduledTaskViewSet(viewsets.ModelViewSet):
                                 execution.status = execution_result['status']
                                 execution.error_message = execution_result['error_message'] or ''
                                 execution.execution_logs = json.dumps(step_results, ensure_ascii=False)
+                                execution.step_results = step_results
                                 execution.execution_time = total_time
                                 execution.screenshots = screenshots
                                 execution.finished_at = timezone.now()
@@ -4142,6 +4402,710 @@ def ensure_ui_project(request):
         'name': ui_project.name,
         'created': True
     })
+
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def learn_elements(request):
+    """连接 Appium dump 当前页面控件，返回元素列表供前端选择"""
+    from .smart_locator import dump_page_elements
+
+    device_id = request.data.get('device_id')
+    app_config_id = request.data.get('app_config_id')
+    app_name = request.data.get('app_name', '万年历')
+
+    if not device_id or not app_config_id:
+        return Response({'success': False, 'message': '缺少 device_id 或 app_config_id'}, status=400)
+
+    try:
+        device = get_object_or_404(AppDevice, id=device_id)
+        app_config = get_object_or_404(AppConfig, id=app_config_id)
+
+        from .appium_engine import AppiumTestEngine
+        engine = AppiumTestEngine(
+            appium_server_url=device.appium_server_url,
+            platform=device.platform,
+            device_udid=device.udid,
+            app_package=app_config.package_name,
+            app_activity=app_config.app_activity,
+            no_reset=True,
+            new_command_timeout=60,
+        )
+        engine.connect()
+        try:
+            engine.driver.activate_app(app_config.package_name)
+        except Exception:
+            pass
+        import time
+        time.sleep(1)
+
+        elements = dump_page_elements(engine)
+
+        if engine.driver:
+            engine.driver.quit()
+
+        return Response({
+            'success': True,
+            'count': len(elements),
+            'elements': elements,
+            'message': f'发现 {len(elements)} 个控件'
+        })
+    except Exception as e:
+        err_msg = str(e).lower()
+        hint = ''
+        if 'instrumentation' in err_msg or 'not running' in err_msg or 'crashed' in err_msg:
+            hint = ' 设备连接可能已断开，建议重新开始录制。'
+        return Response({'success': False, 'message': f'获取页面控件失败: {e}{hint}'}, status=500)
+
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def save_knowledge(request):
+    """保存控件到 JSON 知识库"""
+    from .smart_locator import add_knowledge
+
+    app_name = request.data.get('app_name', '万年历')
+    items = request.data.get('items', [])  # [{chinese_name, value}]
+
+    saved = 0
+    for item in items:
+        add_knowledge(app_name, item.get('chinese_name', ''), item.get('value', ''))
+        saved += 1
+
+    return Response({
+        'success': True,
+        'saved': saved,
+        'message': f'已保存 {saved} 个控件到 "{app_name}" 知识库'
+    })
+
+
+# ==================== 操作录制（自动生成可运行用例） ====================
+# 录制会话：每个用户同时只能有一个进行中的录制会话。
+# key = request.user.id, value 见下方 dict 结构。
+RECORDING_SESSIONS = {}
+
+
+def _recording_session_key(request):
+    return request.user.id
+
+
+def _close_recording_session(key):
+    """关闭录制会话并断开连接（含自动触摸监听）"""
+    sess = RECORDING_SESSIONS.pop(key, None)
+    if sess and sess.get('engine'):
+        engine = sess['engine']
+        # 停止自动触摸捕获
+        if hasattr(engine, 'stop_auto_capture'):
+            try: engine.stop_auto_capture()
+            except Exception: pass
+        try:
+            engine.disconnect()
+        except Exception:
+            pass
+    return sess
+
+
+def _get_screenshot_base64(engine):
+    """获取设备截图 base64（失败返回空串，不影响主流程）"""
+    try:
+        return engine.driver.get_screenshot_base64() if engine and engine.driver else ''
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning('获取设备截图失败: %s', e)
+        return ''
+
+
+def _airtest_script_for_session(sess, steps):
+    """把当前录制会话的步骤实时编译为可直接 `airtest run` 的脚本文本（仅 airtest 引擎）"""
+    if not sess or sess.get('engine_type') != 'airtest':
+        return ''
+    try:
+        from django.conf import settings
+        from .airtest_engine import build_airtest_script
+        return build_airtest_script(
+            steps,
+            app_package=sess['app_config'].package_name,
+            serial=sess['device'].udid,
+            adb_host=getattr(settings, 'AIRTEST_ADB_HOST', 'host.docker.internal'),
+            adb_port=int(getattr(settings, 'AIRTEST_ADB_PORT', 5037)),
+            platform=sess['device'].platform,
+            wda_url=sess['device'].appium_server_url,
+            display_size=sess.get('display'),
+        )
+    except Exception:
+        return ''
+
+
+def _default_desc(action_type, element_data, input_value, assert_value):
+    """为录制步骤生成默认描述"""
+    name = element_data.get('name') if element_data else ''
+    if action_type in ('click', 'tap'):
+        return f"点击{name or '元素'}"
+    if action_type == 'double_tap':
+        return f"双击{name or '元素'}"
+    if action_type == 'long_press':
+        return f"长按{name or '元素'}"
+    if action_type in ('fill', 'input'):
+        return f"在{name or '输入框'}输入「{input_value}」"
+    if action_type == 'clear':
+        return f"清空{name or '输入框'}"
+    if action_type == 'swipe':
+        return f"滑动{input_value or '屏幕'}"
+    if action_type == 'scroll':
+        return f"滚动{name or '页面'}"
+    if action_type == 'screenshot':
+        return "截图"
+    if action_type == 'wait':
+        return f"等待{input_value or '1'}秒"
+    if action_type == 'assert':
+        return f"断言{name or '元素'}{assert_value or ''}"
+    if action_type == 'getText':
+        return f"获取{name or '元素'}文本"
+    if action_type == 'back':
+        return "返回上一页"
+    if action_type == 'home':
+        return "回到主页"
+    if action_type == 'launch_app':
+        return "启动应用"
+    if action_type == 'close_app':
+        return "关闭应用"
+    return action_type
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def start_recording(request):
+    """开始录制：建立并保持 Appium 会话，后续人工操作将被记录为步骤"""
+    device_id = request.data.get('device_id')
+    app_config_id = request.data.get('app_config_id')
+    project_id = request.data.get('project_id')
+    case_name = (request.data.get('case_name') or '').strip()
+    engine_type = (request.data.get('engine') or 'appium').lower()
+    continue_case_id = request.data.get('continue_case_id')  # 继续录制：已有用例 ID
+
+    if not device_id or not app_config_id or not project_id:
+        return Response({'success': False, 'message': '缺少 device_id / app_config_id / project_id'}, status=400)
+
+    try:
+        device = get_object_or_404(AppDevice, id=device_id)
+        app_config = get_object_or_404(AppConfig, id=app_config_id)
+        project = get_object_or_404(UiProject, id=project_id)
+    except Exception as e:
+        return Response({'success': False, 'message': f'参数无效: {e}'}, status=400)
+
+    # 若已有会话，先关闭旧会话
+    key = _recording_session_key(request)
+    _close_recording_session(key)
+
+    # 继续录制：预加载已有用例的步骤
+    existing_steps = []
+    existing_case = None
+    if continue_case_id:
+        try:
+            existing_case = get_object_or_404(TestCase, id=continue_case_id)
+            case_name = case_name or existing_case.name
+            project = existing_case.project  # 强制用用例所属项目
+            # 将 DB 步骤转为录制步骤同构格式（与 _gesture_to_step / _build_test_case_from_steps 兼容）
+            for s in existing_case.steps.all().order_by('step_number'):
+                el_data = None
+                if s.element:
+                    el_data = {
+                        'locator_strategy': s.element.locator_strategy.name if s.element.locator_strategy else 'coordinate',
+                        'locator_value': s.element.locator_value or '',
+                        'name': s.element.name,
+                    }
+                    if s.center_x is not None and s.center_y is not None:
+                        el_data['center_x'] = s.center_x
+                        el_data['center_y'] = s.center_y
+                step_dict = {
+                    'step_number': s.step_number,
+                    'action_type': s.action_type,
+                    'description': s.description or '',
+                    'input_value': s.input_value or '',
+                    'wait_time': s.wait_time or 0,
+                    'assert_type': s.assert_type or '',
+                    'assert_value': s.assert_value or '',
+                    'element': el_data,
+                    'center_x': s.center_x,
+                    'center_y': s.center_y,
+                }
+                existing_steps.append(step_dict)
+        except Exception as e:
+            return Response({'success': False, 'message': f'加载已有用例失败: {e}'}, status=400)
+
+    # Appium 模式：连接前清理设备端残留的 UiAutomator2 进程，
+    # 避免 "UiAutomation not connected" 导致新建 Session 失败
+    if engine_type != 'airtest' and device.udid:
+        import subprocess
+        try:
+            subprocess.run(
+                ['adb', '-s', device.udid, 'shell', 'am', 'force-stop',
+                 'io.appium.uiautomator2.server'],
+                capture_output=True, timeout=5,
+            )
+            logger.info(f"已清理设备 {device.udid} 上的残留 UiAutomator2 进程")
+        except Exception:
+            pass  # 清理失败不阻塞后续连接
+
+    try:
+        if engine_type == 'airtest':
+            from .airtest_engine import AirtestRecordingEngine
+            # iOS 通过 Airtest 连接时不依赖 Appium，复用 appium_server_url 字段存放
+            # WDA(WebDriverAgent) 的 HTTP 代理地址（如 http://host.docker.internal:8100）。
+            engine = AirtestRecordingEngine(
+                serial=device.udid,
+                platform=device.platform,
+                app_package=app_config.package_name,
+                wda_url=device.appium_server_url,
+            )
+            engine.connect()
+            try:
+                engine.activate_app(app_config.package_name)
+            except Exception:
+                pass
+            time.sleep(1)
+            elements = dump_page_elements(engine)
+            screenshot = _get_screenshot_base64(engine)
+            display = engine.display_size
+        else:
+            from .appium_engine import AppiumTestEngine
+            engine = AppiumTestEngine(
+                appium_server_url=device.appium_server_url,
+                platform=device.platform,
+                device_udid=device.udid,
+                app_package=app_config.package_name,
+                app_activity=app_config.app_activity,
+                bundle_id=app_config.package_name if device.platform == 'ios' else None,
+                app_path=app_config.app_path or None,
+                no_reset=True,
+                new_command_timeout=600,
+            )
+            engine.connect()
+            try:
+                engine.driver.activate_app(app_config.package_name)
+            except Exception:
+                pass
+            time.sleep(1)
+            elements = dump_page_elements(engine)
+            screenshot = _get_screenshot_base64(engine)
+            display = None
+    except Exception as e:
+        err_msg = str(e).lower()
+        hint = ''
+        if 'instrumentation' in err_msg or 'not running' in err_msg or 'crashed' in err_msg:
+            hint = (
+                ' 设备端 instrumentation 进程异常，建议：1) 重启 Appium Server；'
+                '2) 在设备上重新打开被测 App 后重试；3) 若仍失败，尝试 adb 重启设备。'
+            )
+        return Response({'success': False, 'message': f'建立录制会话失败: {e}{hint}'}, status=500)
+
+    RECORDING_SESSIONS[key] = {
+        'engine': engine,
+        'engine_type': engine_type,
+        'display': display,
+        'device': device,
+        'app_config': app_config,
+        'project': project,
+        'case_name': case_name or f'录制用例_{timezone.now():%Y%m%d_%H%M%S}',
+        'steps': existing_steps,  # 继续录制时预加载已有步骤，否则为空列表
+        'started_at': timezone.now(),
+        'continue_case_id': continue_case_id,  # 非空表示继续录制模式
+    }
+
+    # 纯 Airtest 模式：启动自动触摸捕获（真机上操作自动记录步骤）
+    auto_capture_ok = False
+    if engine_type == 'airtest' and hasattr(engine, 'start_auto_capture'):
+        sess_ref = RECORDING_SESSIONS[key]  # 闭包引用
+
+        def _auto_step_callback(step_dict):
+            """自动捕获回调：把手势转成的 step 追加到会话 steps"""
+            steps = sess_ref.get('steps', [])
+            step_dict['step_number'] = len(steps) + 1
+            steps.append(step_dict)
+            # 同时更新实时代码（下次 refreshRecordPage 会带上）
+
+        try:
+            auto_capture_ok = engine.start_auto_capture(_auto_step_callback)
+        except Exception:
+            auto_capture_ok = False
+
+    msg = '录制已开始，自动捕获已启用 — 直接在真机上操作即可自动记录每一步' \
+        if auto_capture_ok else '录制已开始，请在真机上操作，并通过面板记录每一步'
+
+    return Response({
+        'success': True,
+        'message': msg,
+        'auto_capture': auto_capture_ok,
+        'elements': elements,
+        'count': len(elements),
+        'screenshot': screenshot,
+        'case_name': RECORDING_SESSIONS[key]['case_name'],
+        'steps': existing_steps,  # 继续录制时返回预加载的步骤
+        'airtest_script': _airtest_script_for_session(RECORDING_SESSIONS[key], existing_steps),
+        'continue_case_id': continue_case_id or None,  # 前端据此判断模式
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def recording_page(request):
+    """获取当前录制会话的实时页面控件（重新 dump）"""
+    key = _recording_session_key(request)
+    sess = RECORDING_SESSIONS.get(key)
+    if not sess or not sess.get('engine'):
+        return Response({'success': False, 'message': '没有进行中的录制会话，请先开始录制'}, status=400)
+    try:
+        time.sleep(0.3)
+        elements = dump_page_elements(sess['engine'])
+        screenshot = _get_screenshot_base64(sess['engine'])
+        return Response({
+            'success': True,
+            'count': len(elements),
+            'elements': elements,
+            'screenshot': screenshot,
+            'steps': sess['steps'],
+            'case_name': sess.get('case_name'),
+            'airtest_script': _airtest_script_for_session(sess, sess['steps']),
+        })
+    except Exception as e:
+        err_msg = str(e).lower()
+        hint = ''
+        if 'instrumentation' in err_msg or 'not running' in err_msg or 'crashed' in err_msg:
+            hint = ' 设备连接可能已断开，建议重新开始录制。'
+        return Response({'success': False, 'message': f'获取页面控件失败: {e}{hint}'}, status=500)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def record_action(request):
+    """记录一个操作：先在真机上真实执行，成功后保存为步骤"""
+    key = _recording_session_key(request)
+    sess = RECORDING_SESSIONS.get(key)
+    if not sess or not sess.get('engine'):
+        return Response({'success': False, 'message': '没有进行中的录制会话，请先开始录制'}, status=400)
+
+    engine = sess['engine']
+    action_type = (request.data.get('action_type') or '').lower()
+    element = request.data.get('element') or {}
+    input_value = request.data.get('input_value', '') or ''
+    assert_type = request.data.get('assert_type', '') or ''
+    assert_value = request.data.get('assert_value', '') or ''
+    wait_time = int(request.data.get('wait_time', 0) or 0)
+
+    valid_actions = {
+        'click', 'tap', 'double_tap', 'long_press', 'fill', 'input', 'clear',
+        'swipe', 'scroll', 'screenshot', 'wait', 'assert', 'getText',
+        'launch_app', 'close_app', 'back', 'home'
+    }
+    if action_type not in valid_actions:
+        return Response({'success': False, 'message': f'不支持的操作类型: {action_type}'}, status=400)
+
+    # 需要目标元素的操作
+    element_data = None
+    need_element = action_type in (
+        'click', 'tap', 'double_tap', 'long_press', 'fill', 'input',
+        'clear', 'assert', 'getText'
+    )
+    if need_element:
+        if not (element and element.get('value')):
+            return Response({'success': False, 'message': '该操作需要提供目标元素'}, status=400)
+        element_data = {
+            'locator_strategy': element.get('strategy', 'xpath'),
+            'locator_value': element.get('value'),
+            'name': element.get('name') or element.get('chinese_name') or element.get('text') or '未命名元素',
+            # 保留坐标信息，用于坐标点击（比 el.click() 更可靠）
+            'center_x': element.get('center_x'),
+            'center_y': element.get('center_y'),
+        }
+
+    step_data = {
+        'step_number': len(sess['steps']) + 1,
+        'action_type': action_type,
+        'description': request.data.get('description', '') or _default_desc(
+            action_type, element_data, input_value, assert_value
+        ),
+        'input_value': input_value,
+        'wait_time': wait_time * 1000,
+        'assert_type': assert_type,
+        'assert_value': assert_value,
+        'element': element_data,
+    }
+
+    # 在真机上真实执行
+    try:
+        result = engine.execute_step(step_data)
+    except Exception as e:
+        return Response({'success': False, 'message': f'执行操作失败: {e}'}, status=500)
+
+    if not result.get('success'):
+        return Response({
+            'success': False,
+            'message': f"操作未在真机上成功执行，已跳过记录: {result.get('error')}",
+            'error': result.get('error'),
+        }, status=400)
+
+    recorded = {
+        'step_number': step_data['step_number'],
+        'action_type': action_type,
+        'description': step_data['description'],
+        'input_value': input_value,
+        'wait_time': wait_time * 1000,
+        'assert_type': assert_type,
+        'assert_value': assert_value,
+        'element': element_data,
+    }
+    sess['steps'].append(recorded)
+
+    # 刷新页面，便于记录下一步
+    try:
+        time.sleep(0.3)
+        elements = dump_page_elements(engine)
+    except Exception:
+        elements = []
+    # 记录操作后页面可能已变化，重新截图便于在变化后的页面继续点选元素
+    try:
+        screenshot = _get_screenshot_base64(engine)
+    except Exception:
+        screenshot = ''
+
+    return Response({
+        'success': True,
+        'message': f"已记录步骤 {recorded['step_number']}: {recorded['description']}",
+        'recorded': recorded,
+        'elements': elements,
+        'count': len(elements),
+        'screenshot': screenshot,
+        'steps': sess['steps'],
+        'airtest_script': _airtest_script_for_session(sess, sess['steps']),
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def stop_recording(request):
+    """停止录制（放弃生成用例）"""
+    key = _recording_session_key(request)
+    sess = _close_recording_session(key)
+    if not sess:
+        return Response({'success': False, 'message': '没有进行中的录制会话'}, status=400)
+    return Response({'success': True, 'message': '录制已停止，未生成用例'})
+
+
+def _build_test_case_from_steps(user, project, case_name, steps, app_package=""):
+    """把归一化步骤落库为 TestCase（含自动建元素、前插启动应用步骤）。
+
+    归一化步骤格式与 generate_recording_case 录制的步骤完全一致：
+    {'action_type','element':{locator_strategy,value,name,center_x,center_y}|None,
+     'input_value','wait_time','assert_type','assert_value','description','center_x','center_y'}
+    录制的步骤与 Airtest 导入的步骤共用此逻辑。
+    """
+    test_case = TestCase.objects.create(
+        name=case_name,
+        description=f"由自动化工具于 {timezone.now():%Y-%m-%d %H:%M:%S} 自动生成"
+                    f"（{'Appium 真机录制' if app_package else '脚本导入'}）",
+        project=project,
+        status='ready',
+        priority='medium',
+        created_by=user,
+    )
+
+    created_elements = 0
+    # 自动在最前面加一步「启动应用」，保证回放从干净的起点开始
+    all_steps = [{'action_type': 'launch_app', 'element': None, 'input_value': '',
+                  'wait_time': 1000, 'assert_type': '', 'assert_value': '',
+                  'description': f'启动应用 {app_package}' if app_package else '启动应用',
+                  'center_x': None, 'center_y': None}] + list(steps)
+    for idx, st in enumerate(all_steps, 1):
+        ed = st.get('element')
+        element_obj = None
+        # 兼容两种归一化格式：record_action 存 locator_value/value，
+        # airtest_importer 可能直接存 value
+        if ed and (ed.get('value') or ed.get('locator_value')):
+            strategy_name = ed.get('locator_strategy', ed.get('strategy', 'xpath'))
+            locator_val = ed.get('value') or ed.get('locator_value')
+            locator_strategy, _ = LocatorStrategy.objects.get_or_create(name=strategy_name)
+            element_obj, el_created = Element.objects.get_or_create(
+                project=project,
+                locator_strategy=locator_strategy,
+                locator_value=locator_val,
+                defaults={
+                    'name': ed.get('name') or ed.get('chinese_name') or '未命名元素',
+                    'element_type': 'INPUT' if st['action_type'] in ('fill', 'input', 'clear') else 'BUTTON',
+                    'created_by': user,
+                }
+            )
+            if el_created:
+                created_elements += 1
+
+        TestCaseStep.objects.create(
+            test_case=test_case,
+            step_number=idx,
+            action_type=st['action_type'],
+            element=element_obj,
+            input_value=st.get('input_value', ''),
+            wait_time=st.get('wait_time', 1000) or 1000,
+            assert_type=st.get('assert_type', ''),
+            assert_value=st.get('assert_value', ''),
+            description=st.get('description', ''),
+            center_x=ed.get('center_x') if ed else None,
+            center_y=ed.get('center_y') if ed else None,
+        )
+
+    return test_case, created_elements, len(all_steps)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def generate_recording_case(request):
+    """结束录制并生成/更新测试用例（继续录制时追加步骤到已有用例）"""
+    key = _recording_session_key(request)
+    sess = RECORDING_SESSIONS.get(key)
+    if not sess:
+        return Response({'success': False, 'message': '没有进行中的录制会话'}, status=400)
+
+    project = sess['project']
+    case_name = (request.data.get('case_name') or '').strip() or sess['case_name']
+    steps = sess['steps']
+    continue_case_id = sess.get('continue_case_id')
+
+    if not steps:
+        _close_recording_session(key)
+        return Response({'success': False, 'message': '尚未记录任何操作步骤，无法生成用例'}, status=400)
+
+    try:
+        # ---- 继续录制模式：删除旧步骤后重建全部步骤（旧+新） ----
+        if continue_case_id:
+            test_case = get_object_or_404(TestCase, id=continue_case_id)
+            test_case.name = case_name
+            test_case.save()
+            # 删除旧步骤（元素保留，因为可能被其他用例引用）
+            test_case.steps.all().delete()
+            # 直接在原用例上重建全部步骤（旧+新）；不要调用
+            # _build_test_case_from_steps（它会另建一个多余的 TestCase）
+            created_elements = 0
+            for idx, st in enumerate(steps, 1):
+                ed = st.get('element')
+                element_obj = None
+                if ed and (ed.get('value') or ed.get('locator_value')):
+                    strategy_name = ed.get('locator_strategy', ed.get('strategy', 'xpath'))
+                    locator_val = ed.get('value') or ed.get('locator_value')
+                    ls, _ = LocatorStrategy.objects.get_or_create(name=strategy_name)
+                    element_obj, el_created = Element.objects.get_or_create(
+                        project=project,
+                        locator_strategy=ls,
+                        locator_value=locator_val,
+                        defaults={
+                            'name': ed.get('name') or ed.get('chinese_name') or '未命名元素',
+                            'element_type': 'INPUT' if st['action_type'] in ('fill', 'input', 'clear') else 'BUTTON',
+                        }
+                    )
+                    if el_created:
+                        created_elements += 1
+                TestCaseStep.objects.update_or_create(
+                    test_case=test_case,
+                    step_number=idx,
+                    defaults={
+                        'action_type': st['action_type'],
+                        'description': st.get('description', ''),
+                        'input_value': st.get('input_value', ''),
+                        'wait_time': st.get('wait_time', 1000) or 1000,
+                        'assert_type': st.get('assert_type', ''),
+                        'assert_value': st.get('assert_value', ''),
+                        'element': element_obj,
+                        'center_x': ed.get('center_x') if ed else None,
+                        'center_y': ed.get('center_y') if ed else None,
+                    }
+                )
+            step_count = len(steps)
+            msg = f'已更新用例「{test_case.name}」，共 {step_count} 个步骤'
+        else:
+            test_case, created_elements, step_count = _build_test_case_from_steps(
+                request.user, project, case_name, steps, sess['app_config'].package_name)
+            msg = f'已生成用例「{test_case.name}」，包含 {step_count} 个步骤（含启动应用）'
+    except Exception as e:
+        _close_recording_session(key)
+        return Response({'success': False, 'message': f'生成用例失败: {e}'}, status=500)
+    finally:
+        _close_recording_session(key)
+
+    # 纯 Airtest 录制模式：额外导出可直接 `airtest run` 的脚本
+    airtest_script = _airtest_script_for_session(sess, steps)
+
+    return Response({
+        'success': True,
+        'message': msg,
+        'case_id': test_case.id,
+        'case_name': test_case.name,
+        'step_count': step_count,
+        'created_elements': created_elements,
+        'engine_type': sess.get('engine_type', 'appium'),
+        'airtest_script': airtest_script,
+        'is_update': bool(continue_case_id),  # 告知前端是追加还是新建
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def import_airtest_script(request):
+    """导入 Airtest / Poco 录制脚本（.air / .py），解析为统一步骤并生成 TestCase
+
+    入参：
+      - script: Airtest 脚本文本（与 script_file 二选一）
+      - script_file: 上传的 .air 脚本文件
+      - project_id: 目标 UI 项目 ID（必填）
+      - case_name: 用例名称（可选，默认自动命名）
+      - app_package: 被测应用包名（可选，用于「启动应用」步骤描述）
+    返回生成的 case_id 与解析出的步骤列表。
+    """
+    script = request.data.get('script') or ''
+    if not script and request.FILES.get('script_file'):
+        try:
+            script = request.FILES['script_file'].read().decode('utf-8', 'ignore')
+        except Exception:
+            script = ''
+    if not script.strip():
+        return Response({'success': False, 'message': '请提供 script 文本或上传 script_file（.air/.py）'}, status=400)
+
+    project_id = request.data.get('project_id')
+    if not project_id:
+        return Response({'success': False, 'message': '缺少 project_id'}, status=400)
+    try:
+        project = get_object_or_404(UiProject, id=project_id)
+    except Exception as e:
+        return Response({'success': False, 'message': f'project_id 无效: {e}'}, status=400)
+
+    case_name = (request.data.get('case_name') or '').strip() or f'Airtest导入_{timezone.now():%Y%m%d_%H%M%S}'
+
+    try:
+        from .airtest_importer import parse_airtest_script
+        steps = parse_airtest_script(script)
+    except Exception as e:
+        return Response({'success': False, 'message': f'脚本解析失败: {e}'}, status=400)
+
+    if not steps:
+        return Response({'success': False, 'message': '未能从脚本中解析出任何操作步骤'}, status=400)
+
+    try:
+        test_case, created_elements, step_count = _build_test_case_from_steps(
+            request.user, project, case_name, steps, request.data.get('app_package', ''))
+    except Exception as e:
+        return Response({'success': False, 'message': f'生成用例失败: {e}'}, status=500)
+
+    return Response({
+        'success': True,
+        'message': f'已生成用例「{test_case.name}」，包含 {step_count} 个步骤（含启动应用）',
+        'case_id': test_case.id,
+        'case_name': test_case.name,
+        'step_count': step_count,
+        'created_elements': created_elements,
+        'parsed_steps': steps,
+    })
+
+
+
 
 
 

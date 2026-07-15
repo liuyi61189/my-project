@@ -12,11 +12,15 @@ from .views import (
     TestCaseGenerationTaskViewSet,
     ConfigStatusViewSet,
     GeneratedRequirementDocViewSet,
+    RequirementAnalysisResultViewSet,
+    ClarificationQuestionViewSet,
     upload_and_analyze,
     analyze_text,
     generate_requirement_doc,
     get_requirement_template,
     generate_knowledge_base,
+    deep_question,
+    refine_analysis,
 )
 
 # 创建DRF路由器
@@ -32,6 +36,8 @@ router.register(r'generation-config', GenerationConfigViewSet, basename='generat
 router.register(r'testcase-generation', TestCaseGenerationTaskViewSet, basename='testcasegenerationtask')
 router.register(r'config', ConfigStatusViewSet, basename='configstatus')
 router.register(r'req-docs', GeneratedRequirementDocViewSet, basename='generatedrequirementdoc')
+router.register(r'analysis-results', RequirementAnalysisResultViewSet, basename='requirementanalysisresult')
+router.register(r'clarifications', ClarificationQuestionViewSet, basename='clarificationquestion')
 
 app_name = 'requirement_analysis'
 
@@ -45,4 +51,6 @@ urlpatterns = [
     path('api/generate-req-doc/', generate_requirement_doc, name='generate-req-doc'),
     path('api/req-doc-template/', get_requirement_template, name='req-doc-template'),
     path('api/generate-knowledge-base/', generate_knowledge_base, name='generate-knowledge-base'),
+    path('api/deep-question/', deep_question, name='deep-question'),
+    path('api/refine-analysis/', refine_analysis, name='refine-analysis'),
 ]

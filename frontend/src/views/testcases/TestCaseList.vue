@@ -627,16 +627,25 @@ const projectVersions = computed(() => {
 
 // 根据选中版本/项目过滤的功能模块列表
 const filteredFeatureModules = computed(() => {
-  // 优先按版本的项目过滤
+  // 优先按版本关联过滤（只显示该版本下的模块）
   if (versionFilter.value) {
-    const version = allVersions.value.find(v => v.id === Number(versionFilter.value))
-    if (version && version.projects) {
-      const projectIds = version.projects.map(p => p.id)
-      return allFeatureModules.value.filter(fm => {
+    const vid = Number(versionFilter.value)
+    return allFeatureModules.value.filter(fm => {
+      // 模块必须关联到该版本
+      if (fm.versions && Array.isArray(fm.versions)) {
+        if (!fm.versions.some(v => v.id === vid)) return false
+      } else {
+        return false
+      }
+      // 同时限制在该版本所属项目下（双重保险）
+      const version = allVersions.value.find(v => v.id === vid)
+      if (version && version.projects) {
+        const projectIds = version.projects.map(p => p.id)
         const pid = fm.project ? fm.project.id : fm.project_id
         return projectIds.includes(pid)
-      })
-    }
+      }
+      return true
+    })
   }
   // 其次按选中的项目过滤
   if (projectFilter.value) {
@@ -713,7 +722,13 @@ const goToTestCase = (id) => {
 }
 
 const editTestCase = (testcase) => {
-  router.push(`/ai-generation/testcases/${testcase.id}/edit`)
+  // 将当前列表的筛选条件带入编辑页，保存后返回详情页才能保持筛选后的用例集合
+  const q = {}
+  const src = route.query
+  ;['search', 'project', 'priority', 'status', 'version', 'feature_module', 'test_point'].forEach(k => {
+    if (src[k]) q[k] = src[k]
+  })
+  router.push({ path: `/ai-generation/testcases/${testcase.id}/edit`, query: q })
 }
 
 const deleteTestCase = async (testcase) => {

@@ -135,8 +135,20 @@ class AppiumTestEngine:
         options.set_capability('autoGrantPermissions', True)
         options.set_capability('skipServerInstallation', True)
         options.set_capability('skipDeviceInitialization', True)
+        # 小米 HyperOS 上忽略隐藏 API 策略权限错误（否则会话创建直接失败）
+        options.set_capability('appium:ignoreHiddenApiPolicyError', True)
 
-        return webdriver.Remote(self.appium_server_url, options=options)
+        driver = webdriver.Remote(self.appium_server_url, options=options)
+        # 小米 HyperOS 上 skipDeviceInitialization 会跳过 app 自动启动，
+        # 需显式把已安装的 app 拉到前台，否则会话建好却停在系统桌面
+        if self.app_package:
+            try:
+                driver.activate_app(self.app_package)
+                logger.info(f"已显式唤起 App: {self.app_package}")
+                print(f"✓ 已唤起 App: {self.app_package}")
+            except Exception as e:
+                logger.warning(f"activate_app 失败（将在执行步骤时重试）: {e}")
+        return driver
 
     def _create_ios_driver(self):
         """创建 iOS WebDriver"""
@@ -172,29 +184,63 @@ class AppiumTestEngine:
 
     # ==================== 元素查找 ====================
 
-    def find_element(self, locator_strategy, locator_value, timeout=10):
+    def find_element(self, locator_strategy, locator_value, timeout=10, element_name=None, element_id=None):
         """
-        根据定位策略查找元素
-
-        Args:
-            locator_strategy: 定位策略 (id/accessibility_id/xpath/class_name/uiautomator/...)
-            locator_value: 定位值
-            timeout: 超时时间(秒)
-
-        Returns:
-            WebElement 对象
-
-        Raises:
-            NoSuchElementException: 元素未找到
+        根据定位策略查找元素。找不到时自动 dump 页面，尝试匹配 element_name 更新定位器后重试。
         """
         by = self.LOCATOR_MAP.get(locator_strategy.lower(), AppiumBy.XPATH)
-        wait = WebDriverWait(self.driver, timeout)
-        return wait.until(EC.presence_of_element_located((by, locator_value)))
+        try:
+            wait = WebDriverWait(self.driver, timeout)
+            return wait.until(EC.presence_of_element_located((by, locator_value)))
+        except (TimeoutException, NoSuchElementException) as e:
+            # 自动 dump + 更新 + 重试
+            try:
+                new_value = self._auto_learn_find(locator_value, element_name)
+                if new_value and new_value != locator_value:
+                    logger.info(f"[自动学习] '{element_name}' 定位器更新: {locator_value} -> {new_value}")
+                    # 更新数据库
+                    if element_id:
+                        self._update_element_locator(element_id, new_value)
+                    # 重试用新定位器
+                    wait2 = WebDriverWait(self.driver, 3)
+                    return wait2.until(EC.presence_of_element_located((by, new_value)))
+            except Exception:
+                pass
+            raise e
 
-    def find_element_safe(self, locator_strategy, locator_value, timeout=5):
+    def _auto_learn_find(self, old_value, element_name):
+        """dump 页面，查找匹配 element_name 的控件 resource-id"""
+        from .smart_locator import dump_page_elements
+        elements = dump_page_elements(self)
+        name_lower = (element_name or '').lower()
+        # 1. 精确匹配：element_name 出现在某个控件的 text 或 chinese_name 中
+        for el in elements:
+            txt = (el.get('text', '') or '').lower()
+            cn = (el.get('chinese_name', '') or '').lower()
+            val = el.get('value', '') or ''
+            if val and not val.startswith('android:') and name_lower:
+                if name_lower in txt or name_lower in cn or txt in name_lower or cn in name_lower:
+                    return val
+        # 2. fallback：如果只有一个有效的 resource-id，就用它
+        valid = [e for e in elements if e.get('value') and not e['value'].startswith('android:')]
+        if len(valid) == 1:
+            return valid[0]['value']
+        return None
+
+    def _update_element_locator(self, element_id, new_value):
+        """更新数据库 Element 定位器值"""
+        try:
+            from django.db import connection
+            with connection.cursor() as cursor:
+                cursor.execute("UPDATE ui_elements SET locator_value = %s WHERE id = %s", [new_value, element_id])
+            logger.info(f"[DB更新] Element id={element_id} 更新为 {new_value}")
+        except Exception as e:
+            logger.warning(f"[DB更新] Element id={element_id} 失败: {e}")
+
+    def find_element_safe(self, locator_strategy, locator_value, timeout=5, element_name=None, element_id=None):
         """安全查找元素，找不到返回 None"""
         try:
-            return self.find_element(locator_strategy, locator_value, timeout)
+            return self.find_element(locator_strategy, locator_value, timeout, element_name, element_id)
         except (TimeoutException, NoSuchElementException):
             return None
 
@@ -298,9 +344,19 @@ class AppiumTestEngine:
     # ==================== 具体操作方法 ====================
 
     def _do_click(self, element_data):
-        """点击元素"""
+        """点击元素：优先使用坐标点击（更可靠），回退到元素 click()"""
         if not element_data:
             raise ValueError("click 操作需要提供元素定位信息")
+        cx = element_data.get('center_x')
+        cy = element_data.get('center_y')
+        # 有坐标时优先使用坐标 tap（Android 自定义 View / 容器类控件经常 el.click() 无效）
+        # driver.tap 是 Appium WebDriver 原生方法，兼容性最好
+        if cx is not None and cy is not None:
+            try:
+                self.driver.tap([(int(cx), int(cy))])
+                return
+            except Exception:
+                pass  # 坐标点击失败，回退到元素点击
         el = self.find_element(
             element_data.get('locator_strategy', 'xpath'),
             element_data.get('locator_value', '')
@@ -308,22 +364,42 @@ class AppiumTestEngine:
         el.click()
 
     def _do_double_tap(self, element_data):
-        """双击元素（Android: 使用 W3C Actions）"""
+        """双击元素（优先坐标点击）"""
         if not element_data:
             raise ValueError("double_tap 操作需要提供元素定位信息")
+        cx = element_data.get('center_x')
+        cy = element_data.get('center_y')
+        if cx is not None and cy is not None:
+            try:
+                # 双击：快速连续两次 tap
+                self.driver.tap([(int(cx), int(cy))])
+                time.sleep(0.05)
+                self.driver.tap([(int(cx), int(cy))])
+                return
+            except Exception:
+                pass
         el = self.find_element(
             element_data.get('locator_strategy', 'xpath'),
             element_data.get('locator_value', '')
         )
-        # 使用 W3C Actions 实现双击
         from appium.webdriver.common.touch_action import TouchAction
         action = TouchAction(self.driver)
         action.tap(el, count=2).perform()
 
     def _do_long_press(self, element_data, duration_str=''):
-        """长按元素"""
+        """长按元素（优先坐标长按）"""
         if not element_data:
             raise ValueError("long_press 操作需要提供元素定位信息")
+        cx = element_data.get('center_x')
+        cy = element_data.get('center_y')
+        if cx is not None and cy is not None:
+            try:
+                duration = int(duration_str) if duration_str else 1000
+                # driver.tap 支持 duration 参数（毫秒），直接实现长按
+                self.driver.tap([(int(cx), int(cy)), (int(cx), int(cy))], duration=duration)
+                return
+            except Exception:
+                pass
         el = self.find_element(
             element_data.get('locator_strategy', 'xpath'),
             element_data.get('locator_value', '')

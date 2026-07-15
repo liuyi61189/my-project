@@ -26,6 +26,14 @@ from .views import (
     AppConfigViewSet,
     get_all_projects_unified,
     ensure_ui_project,
+    learn_elements,
+    save_knowledge,
+    start_recording,
+    recording_page,
+    record_action,
+    stop_recording,
+    generate_recording_case,
+    import_airtest_script,
 )
 from .views_config import EnvironmentConfigViewSet, AIIntelligentModeConfigViewSet
 
@@ -65,6 +73,14 @@ urlpatterns = [
     path('', include(router.urls)),
     path('all-projects/', get_all_projects_unified, name='all-projects-unified'),
     path('ensure-ui-project/', ensure_ui_project, name='ensure-ui-project'),
+    path('learn-elements/', learn_elements, name='learn-elements'),
+    path('save-knowledge/', save_knowledge, name='save-knowledge'),
+    path('recording/start/', start_recording, name='recording-start'),
+    path('recording/page/', recording_page, name='recording-page'),
+    path('recording/action/', record_action, name='recording-action'),
+    path('recording/stop/', stop_recording, name='recording-stop'),
+    path('recording/generate/', generate_recording_case, name='recording-generate'),
+    path('airtest/import/', import_airtest_script, name='airtest-import'),
 ]
 
 # 添加媒体文件路由

@@ -2,7 +2,7 @@ from rest_framework import serializers
 from .models import (
     RequirementDocument, RequirementAnalysis, BusinessRequirement,
     GeneratedTestCase, AnalysisTask, AIModelConfig, PromptConfig, TestCaseGenerationTask,
-    GenerationConfig, GeneratedRequirementDoc
+    GenerationConfig, GeneratedRequirementDoc, RequirementAnalysisResult, ClarificationQuestion
 )
 
 
@@ -227,6 +227,7 @@ class TestCaseGenerationTaskSerializer(serializers.ModelSerializer):
                  'reviewer_model_config', 'reviewer_model_name', 'writer_prompt_config', 'writer_prompt_name',
                  'reviewer_prompt_config', 'reviewer_prompt_name', 'generated_test_cases',
                  'review_feedback', 'human_feedback', 'final_test_cases', 'kb_audit_result',
+                 'confirmed_answers',
                  'review_count', 'review_updated_at', 'review_status',
                  'generation_log', 'error_message',
                  'created_by', 'created_by_name', 'created_at', 'updated_at', 'completed_at']
@@ -276,6 +277,10 @@ class TestCaseGenerationRequestSerializer(serializers.Serializer):
         choices=[('smart', '智能'), ('quick', '快速'), ('standard', '标准'), ('comprehensive', '全面')],
         default='smart',
         help_text="生成模式：智能(默认)/快速(10-20条)/标准(20-40条)/全面(不限)"
+    )
+    confirmed_answers = serializers.CharField(
+        required=False, allow_blank=True,
+        help_text='需求拆解阶段确认的问答对JSON: [{question,answer}]，将注入用例生成提示词'
     )
 
 
@@ -335,3 +340,46 @@ class GeneratedRequirementDocListSerializer(serializers.ModelSerializer):
         if not obj.markdown_content:
             return ''
         return obj.markdown_content[:200]
+
+
+class RequirementAnalysisResultSerializer(serializers.ModelSerializer):
+    """需求拆解结果详情序列化器（含完整内容）"""
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+    req_doc = serializers.IntegerField(source='req_doc_id', required=False, allow_null=True)
+
+    class Meta:
+        model = RequirementAnalysisResult
+        fields = [
+            'id', 'title', 'requirement_text', 'result_content',
+            'project', 'project_name', 'req_doc', 'created_by', 'created_by_name', 'created_at'
+        ]
+        read_only_fields = ['created_at', 'created_by']
+
+
+class RequirementAnalysisResultListSerializer(serializers.ModelSerializer):
+    """需求拆解结果列表序列化器（不含完整内容）"""
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+    req_doc = serializers.IntegerField(source='req_doc_id', read_only=True)
+
+    class Meta:
+        model = RequirementAnalysisResult
+        fields = [
+            'id', 'title', 'content_preview', 'project', 'project_name', 'req_doc',
+            'created_by', 'created_by_name', 'created_at'
+        ]
+        read_only_fields = ['created_at', 'created_by']
+
+
+class ClarificationQuestionSerializer(serializers.ModelSerializer):
+    """深度追问清单条目序列化器"""
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = ClarificationQuestion
+        fields = [
+            'id', 'analysis_result', 'question', 'answer', 'category',
+            'status', 'status_display', 'order', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']

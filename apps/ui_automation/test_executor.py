@@ -1233,7 +1233,9 @@ class TestExecutor:
                         'id': step.element.id,
                         'name': step.element.name,
                         'locator_value': step.element.locator_value,
-                        'locator_strategy': step.element.locator_strategy.name if step.element.locator_strategy else 'xpath'
+                        'locator_strategy': step.element.locator_strategy.name if step.element.locator_strategy else 'xpath',
+                        'center_x': step.center_x,
+                        'center_y': step.center_y,
                     }
 
                 case_data['steps'].append(step_data)
