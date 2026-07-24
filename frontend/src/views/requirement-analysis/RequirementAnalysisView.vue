@@ -910,9 +910,13 @@
               <label>功能模块</label>
               <select v-model="generateConfirmForm.feature_module_id" class="form-select" @change="onConfirmFeatureModuleChange">
                 <option :value="null">请选择功能模块</option>
-                <option v-for="fm in generateConfirmFeatureModules" :key="fm.id" :value="fm.id">
-                  {{ fm.name }}
-                </option>
+                <optgroup v-if="generateConfirmFeatureModuleGroups.version.length" :label="`已关联 ${generateConfirmVersionName}`">
+                  <option v-for="fm in generateConfirmFeatureModuleGroups.version" :key="fm.id" :value="fm.id">{{ fm.name }}</option>
+                </optgroup>
+                <optgroup v-if="generateConfirmFeatureModuleGroups.unassociated.length" label="未关联版本">
+                  <option v-for="fm in generateConfirmFeatureModuleGroups.unassociated" :key="fm.id" :value="fm.id">{{ fm.name }}</option>
+                </optgroup>
+                <option v-for="fm in generateConfirmFeatureModuleGroups.all" :key="fm.id" :value="fm.id">{{ fm.name }}</option>
               </select>
               <button class="quick-create-ver-btn" style="margin-left:8px;vertical-align:middle" @click="openQuickCreateFeatureModule(generateConfirmForm.project_id)" title="快速新建功能模块">+</button>
             </div>
@@ -1112,13 +1116,18 @@
           </div>
 
           <!-- 任务完成后的操作按钮 -->
-          <div v-if="showResults" class="completion-actions">
+          <div v-if="showResults && generationResult" class="completion-actions">
             <button class="download-btn" @click="downloadTestCases">
               <span>📥 下载测试用例</span>
             </button>
             <button class="save-btn" @click="saveToTestCaseRecords">
               <span>💾 保存到用例库</span>
             </button>
+            <button class="new-generation-btn" @click="resetGeneration">
+              <span>📝 生成新用例</span>
+            </button>
+          </div>
+          <div v-else-if="showResults" class="completion-actions">
             <button class="new-generation-btn" @click="resetGeneration">
               <span>📝 生成新用例</span>
             </button>
@@ -1466,6 +1475,31 @@ export default {
       }
       if (!this.allFeatureModules) return []
       return this.allFeatureModules.filter(fm => fm.project?.id === this.generateConfirmForm.project_id)
+    },
+    generateConfirmVersionName() {
+      if (!this.generateConfirmForm.version_id) return ''
+      const v = this.generateConfirmVersions.find(v => v.id === Number(this.generateConfirmForm.version_id))
+      return v ? v.name : ''
+    },
+    // 生成确认弹窗功能模块下拉分组：已关联选中版本 + 未关联版本
+    generateConfirmFeatureModuleGroups() {
+      if (!this.generateConfirmForm.project_id) {
+        return { version: [], unassociated: [], all: this.allFeatureModules || [] }
+      }
+      if (!this.allFeatureModules) return { version: [], unassociated: [], all: [] }
+      const base = this.allFeatureModules.filter(fm => fm.project?.id === this.generateConfirmForm.project_id)
+      if (this.generateConfirmForm.version_id) {
+        const vid = Number(this.generateConfirmForm.version_id)
+        const versionMods = []
+        const unassociated = []
+        for (const fm of base) {
+          const versions = fm.versions || []
+          if (versions.some(v => v.id === vid)) versionMods.push(fm)
+          else if (versions.length === 0) unassociated.push(fm)
+        }
+        return { version: versionMods, unassociated, all: [] }
+      }
+      return { version: [], unassociated: [], all: base }
     },
     generateConfirmTestPoints() {
       if (!this.generateConfirmForm.feature_module_id) return []
@@ -2678,8 +2712,8 @@ export default {
     async sendDeepQuestion() {
       const question = this.deepQuestionInput.trim()
       if (!question) return
-      this.deepQuestionInput = ''
-      // 加入用户消息
+      // 注意：先不立即清空输入框，等发送成功后再清空；失败则保留内容以便重试
+      // 加入用户消息（用于上下文历史）
       this.deepChatMessages.push({ role: 'user', content: question })
       this.deepChatLoading = true
       this.deepStreamingContent = ''
@@ -2728,10 +2762,16 @@ export default {
         // 完成
         this.deepChatMessages.push({ role: 'assistant', content: this.deepStreamingContent })
         this.deepStreamingContent = ''
+        this.deepQuestionInput = ''  // 仅发送成功后才清空输入框
       } catch (err) {
         console.error('深度追问失败:', err)
         const errMsg = err.message || '追问失败，请重试'
         this.deepChatMessages.push({ role: 'assistant', content: `⚠️ ${errMsg}` })
+        // 回滚：移除本次失败临时加入的用户消息，并保留输入框内容以便重试
+        if (this.deepChatMessages[this.deepChatMessages.length - 2]?.role === 'user') {
+          this.deepChatMessages.splice(this.deepChatMessages.length - 2, 1)
+        }
+        this.deepQuestionInput = question
       } finally {
         this.deepChatLoading = false
         this.$nextTick(() => this.scrollToDeepBottom())
@@ -3668,6 +3708,10 @@ export default {
     // 下载测试用例为xlsx文件
     async downloadTestCases() {
       try {
+        if (!this.generationResult || !this.generationResult.task_id) {
+          ElMessage.warning('没有可下载的生成结果，请先完成用例生成')
+          return
+        }
         // 解析最终测试用例内容
         const finalTestCases = this.generationResult.final_test_cases;
         const taskId = this.generationResult.task_id;
@@ -3766,6 +3810,10 @@ export default {
     // 保存到用例记录
     async saveToTestCaseRecords() {
       try {
+        if (!this.generationResult || !this.generationResult.task_id) {
+          ElMessage.warning('没有可保存的生成结果，请先完成用例生成')
+          return
+        }
         // 调用后端API保存到记录
         const response = await api.post(`/requirement-analysis/api/testcase-generation/${this.generationResult.task_id}/save_to_records/`)
 

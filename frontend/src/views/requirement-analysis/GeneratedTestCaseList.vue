@@ -42,9 +42,13 @@
           <label>功能模块:</label>
           <select v-model="selectedFeatureModule" @change="onFeatureModuleChange" class="filter-select" :disabled="!selectedProject && !selectedVersion">
             <option value="">全部模块</option>
-            <option v-for="fm in filteredFeatureModules" :key="fm.id" :value="fm.id">
-              {{ fm.name }}
-            </option>
+            <optgroup v-if="featureModuleGroups.version.length" :label="`已关联 ${selectedVersionName}`">
+              <option v-for="fm in featureModuleGroups.version" :key="fm.id" :value="fm.id">{{ fm.name }}</option>
+            </optgroup>
+            <optgroup v-if="featureModuleGroups.unassociated.length" label="未关联版本">
+              <option v-for="fm in featureModuleGroups.unassociated" :key="fm.id" :value="fm.id">{{ fm.name }}</option>
+            </optgroup>
+            <option v-for="fm in featureModuleGroups.all" :key="fm.id" :value="fm.id">{{ fm.name }}</option>
           </select>
         </div>
 
@@ -388,7 +392,17 @@
                 <div style="display:flex;gap:6px;align-items:center;">
                   <select v-model="adoptForm.feature_module_id" style="flex:1">
                     <option value="">请选择功能模块</option>
-                    <option v-for="fm in availableFeatureModulesCalc" :key="fm.id" :value="fm.id">
+                    <optgroup v-if="adoptFeatureModuleGroups.version.length" :label="`已关联 ${adoptVersionName}`">
+                      <option v-for="fm in adoptFeatureModuleGroups.version" :key="fm.id" :value="fm.id">
+                        {{ fm.project?.name ? `${fm.project.name} / ${fm.name}` : fm.name }}
+                      </option>
+                    </optgroup>
+                    <optgroup v-if="adoptFeatureModuleGroups.unassociated.length" label="未关联版本">
+                      <option v-for="fm in adoptFeatureModuleGroups.unassociated" :key="fm.id" :value="fm.id">
+                        {{ fm.project?.name ? `${fm.project.name} / ${fm.name}` : fm.name }}
+                      </option>
+                    </optgroup>
+                    <option v-for="fm in adoptFeatureModuleGroups.all" :key="fm.id" :value="fm.id">
                       {{ fm.project?.name ? `${fm.project.name} / ${fm.name}` : fm.name }}
                     </option>
                   </select>
@@ -593,13 +607,30 @@ export default {
       }
     },
     
-    // 可用功能模块 - 根据是否选择项目来决定显示哪些功能模块
-    availableFeatureModulesCalc() {
-      if (this.adoptForm.project_id && this.availableFeatureModules.length > 0) {
-        return this.availableFeatureModules
-      } else {
-        return this.allFeatureModules
+    // 采用表单选中版本的名称（用于下拉分组标题）
+    adoptVersionName() {
+      if (!this.adoptForm.version_id) return ''
+      const list = (this.adoptForm.project_id && this.projectVersions.length) ? this.projectVersions : this.allVersions
+      const v = list.find(v => v.id === Number(this.adoptForm.version_id))
+      return v ? v.name : ''
+    },
+
+    // 采用表单功能模块下拉分组：已关联选中版本 + 未关联版本
+    adoptFeatureModuleGroups() {
+      const base = (this.adoptForm.project_id && this.availableFeatureModules.length > 0)
+        ? this.availableFeatureModules : this.allFeatureModules
+      if (this.adoptForm.version_id) {
+        const vid = Number(this.adoptForm.version_id)
+        const versionMods = []
+        const unassociated = []
+        for (const fm of base) {
+          const versions = fm.versions || []
+          if (versions.some(v => v.id === vid)) versionMods.push(fm)
+          else if (versions.length === 0) unassociated.push(fm)
+        }
+        return { version: versionMods, unassociated, all: [] }
       }
+      return { version: [], unassociated: [], all: base }
     },
     
     // 计算总页数
@@ -619,29 +650,45 @@ export default {
       return this.tasks.length > 0 && this.selectedTasks.length === this.tasks.length
     },
 
-    // 根据选中项目/版本过滤的功能模块列表（用于筛选区）
-    filteredFeatureModules() {
-      // 如果选了版本，优先按版本的所属项目过滤（更精确）
+    // 选中版本的名称（用于下拉分组标题）
+    selectedVersionName() {
+      if (!this.selectedVersion) return ''
+      const v = this.allVersions.find(v => v.id === Number(this.selectedVersion))
+      return v ? v.name : ''
+    },
+
+    // 功能模块下拉分组：属于选中版本的归「已关联」，未填写版本的归「未关联版本」
+    featureModuleGroups() {
+      // 选了版本 → 按版本关联分组
       if (this.selectedVersion) {
-        const version = this.allVersions.find(v => v.id === Number(this.selectedVersion))
-        if (version && version.projects && version.projects.length > 0) {
-          // 版本可能关联多个项目，取所有项目ID
-          const versionProjectIds = version.projects.map(p => p.id)
-          return this.allFeatureModules.filter(fm => {
-            const fpid = fm.project ? fm.project.id : fm.project_id
-            return versionProjectIds.includes(fpid)
-          })
+        const vid = Number(this.selectedVersion)
+        const version = this.allVersions.find(v => v.id === vid)
+        const projectIds = (version && version.projects && version.projects.length)
+          ? version.projects.map(p => p.id) : []
+        const versionMods = []
+        const unassociated = []
+        for (const fm of this.allFeatureModules) {
+          const fpid = fm.project ? fm.project.id : fm.project_id
+          if (projectIds.length && !projectIds.includes(fpid)) continue
+          const versions = fm.versions || []
+          if (versions.some(v => v.id === vid)) versionMods.push(fm)
+          else if (versions.length === 0) unassociated.push(fm)
         }
+        return { version: versionMods, unassociated, all: [] }
       }
       // 没有版本但选了项目 → 按项目过滤
       if (this.selectedProject) {
         const pid = Number(this.selectedProject)
-        return this.allFeatureModules.filter(fm => {
-          const fpid = fm.project ? fm.project.id : fm.project_id
-          return fpid === pid
-        })
+        return {
+          version: [],
+          unassociated: [],
+          all: this.allFeatureModules.filter(fm => {
+            const fpid = fm.project ? fm.project.id : fm.project_id
+            return fpid === pid
+          })
+        }
       }
-      return []
+      return { version: [], unassociated: [], all: [] }
     },
 
     // 根据选中功能模块过滤的测试点列表
