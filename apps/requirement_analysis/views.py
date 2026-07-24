@@ -2317,7 +2317,8 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                                 )
                     
                     adopted_count = 0
-                    for test_case in test_cases:
+                    batch_time = timezone.now()  # 同一批采纳共享创建时间，保证整块排序
+                    for sort_idx, test_case in enumerate(test_cases, 1):
                         tc = TestCase.objects.create(
                             project=project,
                             author=task.created_by,
@@ -2328,7 +2329,9 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                             expected_result=test_case.get('expected', ''),
                             priority=self._map_priority(test_case.get('priority', '中')),
                             test_type='functional',
-                            status='draft'
+                            status='draft',
+                            sort_order=sort_idx,
+                            created_at=batch_time,
                         )
                         # 关联版本
                         if task.version_id:
@@ -2463,7 +2466,8 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                             )
                 
                 adopted_count = 0
-                for test_case in test_cases:
+                batch_time = timezone.now()  # 同一批采纳共享创建时间，保证整块排序
+                for sort_idx, test_case in enumerate(test_cases, 1):
                     tc = TestCase.objects.create(
                         project=project,  # 使用统一的项目选择逻辑
                         author=task.created_by,
@@ -2474,7 +2478,9 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                         expected_result=test_case.get('expected', ''),
                         priority=self._map_priority(test_case.get('priority', '中')),
                         test_type='functional',
-                        status='draft'
+                        status='draft',
+                        sort_order=sort_idx,
+                        created_at=batch_time,
                     )
                     # 关联版本
                     if task.version_id:
@@ -2565,7 +2571,8 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                             )
                 
                 adopted_count = 0
-                for case_data in test_cases_data:
+                batch_time = timezone.now()  # 同一批采纳共享创建时间，保证整块排序
+                for sort_idx, case_data in enumerate(test_cases_data, 1):
                     tc = TestCase.objects.create(
                         project=project,  # 使用统一的项目选择逻辑
                         author=task.created_by,
@@ -2576,7 +2583,9 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
                         expected_result=case_data.get('expected_result', ''),
                         priority=case_data.get('priority', 'medium'),
                         test_type=case_data.get('test_type', 'functional'),
-                        status=case_data.get('status', 'draft')
+                        status=case_data.get('status', 'draft'),
+                        sort_order=sort_idx,
+                        created_at=batch_time,
                     )
                     # 关联版本
                     if task.version_id:
