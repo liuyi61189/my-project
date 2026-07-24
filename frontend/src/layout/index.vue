@@ -22,6 +22,7 @@
               </template>
               <el-menu-item index="/ai-generation/requirement-analysis">AI用例生成</el-menu-item>
               <el-menu-item index="/ai-generation/generated-testcases">AI生成用例记录</el-menu-item>
+              <el-menu-item index="/ai-generation/modao-skill">墨刀需求用例</el-menu-item>
               <el-menu-item index="/ai-generation/prompt-config">提示词配置</el-menu-item>
             </el-sub-menu>
             <el-menu-item index="/ai-generation/projects">

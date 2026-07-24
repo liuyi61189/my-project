@@ -51,6 +51,11 @@ const routes = [
         component: () => import('@/views/requirement-analysis/RequirementAnalysisView.vue')
       },
       {
+        path: 'modao-skill',
+        name: 'ModaoSkill',
+        component: () => import('@/views/requirement-analysis/ModaoSkillView.vue')
+      },
+      {
         path: 'projects',
         name: 'Projects',
         component: ProjectList
