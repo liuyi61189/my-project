@@ -22,6 +22,12 @@ from .views import (
     deep_question,
     refine_analysis,
 )
+from .modao_views import (
+    modao_list, modao_create, modao_extract, modao_struct, modao_clarify, modao_design,
+    modao_generate_cases, modao_approve_case_generation,
+    modao_confirm, modao_smoke, modao_detail, modao_excel,     modao_edit, modao_ask, modao_adopt,
+    modao_adopt_single,
+)
 
 # 创建DRF路由器
 router = DefaultRouter()
@@ -53,4 +59,22 @@ urlpatterns = [
     path('api/generate-knowledge-base/', generate_knowledge_base, name='generate-knowledge-base'),
     path('api/deep-question/', deep_question, name='deep-question'),
     path('api/refine-analysis/', refine_analysis, name='refine-analysis'),
+
+    # 墨刀技能：需求读取与用例生成（5 阶段引导式工作流）
+    path('api/modao/create/', modao_create, name='modao-create'),
+    path('api/modao/list/', modao_list, name='modao-list'),
+    path('api/modao/<int:pk>/extract/', modao_extract, name='modao-extract'),
+    path('api/modao/<int:pk>/struct/', modao_struct, name='modao-struct'),
+    path('api/modao/<int:pk>/clarify/', modao_clarify, name='modao-clarify'),
+    path('api/modao/<int:pk>/design/', modao_design, name='modao-design'),
+    path('api/modao/<int:pk>/generate-cases/', modao_generate_cases, name='modao-generate-cases'),
+    path('api/modao/<int:pk>/approve-case-generation/', modao_approve_case_generation, name='modao-approve-case-generation'),
+    path('api/modao/<int:pk>/confirm/', modao_confirm, name='modao-confirm'),
+    path('api/modao/<int:pk>/smoke/', modao_smoke, name='modao-smoke'),
+    path('api/modao/<int:pk>/edit/', modao_edit, name='modao-edit'),
+    path('api/modao/<int:pk>/ask/', modao_ask, name='modao-ask'),
+    path('api/modao/<int:pk>/', modao_detail, name='modao-detail'),
+    path('api/modao/<int:pk>/excel/', modao_excel, name='modao-excel'),
+    path('api/modao/<int:pk>/adopt/', modao_adopt, name='modao-adopt'),
+    path('api/modao/<int:pk>/adopt-single/', modao_adopt_single, name='modao-adopt-single'),
 ]

@@ -2,7 +2,8 @@ from rest_framework import serializers
 from .models import (
     RequirementDocument, RequirementAnalysis, BusinessRequirement,
     GeneratedTestCase, AnalysisTask, AIModelConfig, PromptConfig, TestCaseGenerationTask,
-    GenerationConfig, GeneratedRequirementDoc, RequirementAnalysisResult, ClarificationQuestion
+    GenerationConfig, GeneratedRequirementDoc, RequirementAnalysisResult, ClarificationQuestion,
+    ModaoPrototype, ModaoPage
 )
 
 
@@ -383,3 +384,49 @@ class ClarificationQuestionSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'order', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class ModaoPageSerializer(serializers.ModelSerializer):
+    """墨刀单页提取结果序列化器"""
+    class Meta:
+        model = ModaoPage
+        fields = ['id', 'page_no', 'page_name', 'text', 'annotations', 'screenshot']
+
+
+class ModaoPrototypeSerializer(serializers.ModelSerializer):
+    """墨刀技能 - 原型/需求来源序列化器（含逐页结果与各阶段产物）"""
+    pages = ModaoPageSerializer(many=True, read_only=True)
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    confirmations = serializers.SerializerMethodField()
+    feature_module_info = serializers.SerializerMethodField()
+    generation_gate = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ModaoPrototype
+        fields = [
+            'id', 'uuid', 'title', 'url', 'source_type', 'status', 'current_stage',
+            'extracted_json', 'requirement_summary', 'clarification_log', 'module_split',
+            'risks_json', 'pci_json', 'final_testpoints_json', 'testcases_json',
+            'smoke_json', 'quality_report_json', 'excel_path', 'stage4_decision',
+            'error_message', 'work_log', 'qa_log', 'project', 'project_name', 'created_by_name', 'created_at', 'updated_at',
+            'pages', 'confirmations', 'feature_module_info', 'generation_gate',
+        ]
+        read_only_fields = [
+            'id', 'uuid', 'status', 'current_stage', 'extracted_json', 'requirement_summary',
+            'clarification_log', 'module_split', 'risks_json', 'pci_json',
+            'final_testpoints_json', 'testcases_json', 'smoke_json', 'quality_report_json',
+            'excel_path', 'stage4_decision', 'error_message', 'work_log', 'qa_log', 'created_by_name',
+            'created_at', 'updated_at', 'pages', 'confirmations', 'generation_gate',
+        ]
+
+    def get_confirmations(self, obj):
+        return obj.get_confirmations()
+
+    def get_feature_module_info(self, obj):
+        if obj.feature_module_id:
+            return {'id': obj.feature_module_id, 'name': obj.feature_module.name}
+        return None
+
+    def get_generation_gate(self, obj):
+        return obj.case_generation_gate()
