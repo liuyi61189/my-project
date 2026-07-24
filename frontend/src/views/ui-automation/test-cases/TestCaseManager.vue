@@ -1,7 +1,7 @@
 <template>
   <div class="test-case-manager">
     <div class="page-header">
-      <h1 class="page-title">测试用例管理</h1>
+      <h1 class="page-title">{{ isAppModule ? '真机录制' : '测试用例管理' }}</h1>
       <div class="header-actions">
         <el-select v-model="projectId" placeholder="选择项目" style="width: 200px; margin-right: 15px" @change="onProjectChange">
           <el-option-group label="UI自动化项目">
@@ -131,14 +131,14 @@
               <template v-if="selectedEngine === 'appium' || selectedEngine === 'airtest'">
                 <el-radio-group v-model="recordingEngine" size="small" style="margin-right: 10px" v-if="selectedEngine === 'appium'">
                   <el-radio-button label="appium">真机 (Appium)</el-radio-button>
-                  <el-radio-button v-if="isAppModule" label="airtest">纯 Airtest</el-radio-button>
+                  <el-radio-button label="airtest">纯 Airtest</el-radio-button>
                 </el-radio-group>
                 <el-select v-model="selectedDeviceId" placeholder="选择设备" size="small" style="width: 150px; margin-right: 10px" filterable>
                   <el-option
                     v-for="d in appDevices"
-                    :key="d.id"
+                    :key="d.device_id || d.id"
                     :label="`${d.name} (${d.platform})`"
-                    :value="d.id"
+                    :value="d.device_id"
                     :disabled="d.status !== 'online'"
                   />
                 </el-select>
@@ -336,6 +336,38 @@
             </div>
           </div>
 
+          <!-- 执行记录历史 -->
+          <div v-if="selectedTestCase" class="execution-history">
+            <div class="history-header" @click="historyCollapsed = !historyCollapsed">
+              <el-icon><Clock /></el-icon>
+              <span class="history-title">执行记录</span>
+              <el-tag v-if="executionHistory.length" size="small" type="info" round>{{ executionHistory.length }}</el-tag>
+              <span class="history-spacer" />
+              <el-icon class="collapse-icon" :class="{ 'is-collapsed': historyCollapsed }"><ArrowDown /></el-icon>
+            </div>
+            <div v-show="!historyCollapsed" class="history-body">
+              <div v-if="historyLoading" class="history-loading">
+                <el-icon class="is-loading"><Loading /></el-icon> 加载中...
+              </div>
+              <el-empty v-else-if="executionHistory.length === 0" description="暂无执行记录" :image-size="60" />
+              <div v-else class="history-list">
+                <div
+                  v-for="rec in executionHistory"
+                  :key="rec.id"
+                  class="history-item"
+                  :class="{ active: selectedHistoryId === rec.id }"
+                  @click="viewExecution(rec)"
+                >
+                  <el-tag :type="getStatusTag(rec.status)" size="small">{{ getStatusText(rec.status) }}</el-tag>
+                  <span class="history-engine">{{ rec.engine || '-' }}</span>
+                  <span class="history-time">{{ formatTime(rec.created_at) }}</span>
+                  <span class="history-duration" v-if="rec.execution_time">· {{ rec.execution_time }}s</span>
+                  <span class="history-creator" v-if="rec.created_by_name">· {{ rec.created_by_name }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- 执行结果 -->
           <div v-if="executionResult" class="execution-result" v-show="!showSteps">
             <div class="result-header">
@@ -371,6 +403,16 @@
                           </el-tag>
                           <span class="log-action">{{ getActionText(step.action_type) }}</span>
                           <span class="log-desc">{{ step.description }}</span>
+                          <!-- 每步截图缩略图 -->
+                          <div v-if="step.screenshot" class="step-screenshot-thumb" @click.stop>
+                            <el-image
+                              :src="step.screenshot"
+                              fit="cover"
+                              :preview-src-list="getStepScreenshotList()"
+                              :initial-index="getStepScreenshotIndex(index)"
+                              :hide-on-click-modal="true"
+                            />
+                          </div>
                         </div>
                         <div v-if="step.error" class="log-error">
                           <el-icon><WarningFilled /></el-icon>
@@ -796,8 +838,8 @@
               记录断言
             </el-button>
           </div>
-          <div class="rec-actions" v-if="!recording">
-            <span class="rec-sub">滑动：</span>
+          <div class="rec-actions" v-if="recording && recOpMode === 'swipe'">
+            <span class="rec-sub">滑动(先点选一个元素，再点方向)：</span>
             <el-button size="small" :disabled="!selectedRecordElement" :loading="isRecordingBusy" @click="recordSwipe('up')">上</el-button>
             <el-button size="small" :disabled="!selectedRecordElement" :loading="isRecordingBusy" @click="recordSwipe('down')">下</el-button>
             <el-button size="small" :disabled="!selectedRecordElement" :loading="isRecordingBusy" @click="recordSwipe('left')">左</el-button>
@@ -826,8 +868,8 @@
           </div>
         </div>
 
-        <!-- 右二：实时生成的 Airtest 代码（边录边看，仅 App 模块显示） -->
-        <div v-if="isAppModule" class="rec-code">
+        <!-- 右二：实时生成的 Airtest 代码（边录边看，纯 Airtest 模式显示） -->
+        <div v-if="recordingEngine === 'airtest'" class="rec-code">
           <div class="rec-panel-title">
             实时生成的 Airtest 代码
             <el-tag v-if="recordingEngine === 'airtest'" size="small" type="success">纯 Airtest</el-tag>
@@ -855,7 +897,7 @@ import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Search, Plus, Edit, Delete, Check, CaretRight, ArrowUp, ArrowDown, Rank, Picture, Warning, View, ZoomIn, Refresh, WarningFilled, MagicStick, VideoCamera, Upload
+  Search, Plus, Edit, Delete, Check, CaretRight, ArrowUp, ArrowDown, Rank, Picture, Warning, View, ZoomIn, Refresh, WarningFilled, MagicStick, VideoCamera, Upload, Clock, Loading
 } from '@element-plus/icons-vue'
 import draggable from 'vuedraggable'
 import { useUnifiedProjects } from '@/utils/useUnifiedProjects'
@@ -870,6 +912,7 @@ import {
   getTestCases,
   runTestCase as runTestCaseApi,
   getTestCaseExecution,
+  getTestCaseExecutions,
   copyTestCase as copyTestCaseApi,
   getLocatorStrategies,
   getAppDevices,
@@ -882,6 +925,8 @@ import {
   generateRecordingCase,
   importAirtestScript
 } from '@/api/ui_automation'
+
+import { getDeviceList as getNewDeviceList } from '@/api/app-automation'
 
 // 响应式数据
 const { allProjects, uiProjects, aiProjects, loadProjects: loadAllProjects, resolveUiProjectId } = useUnifiedProjects()
@@ -904,6 +949,11 @@ const showSteps = ref(true)
 const showScreenshotPreview = ref(false)
 const currentScreenshot = ref(null)
 const isRunning = ref(false)
+// 执行记录历史
+const executionHistory = ref([])
+const historyLoading = ref(false)
+const selectedHistoryId = ref(null)
+const historyCollapsed = ref(false)
 const selectedEngine = ref('appium')  // 默认使用Appium（真机录制）
 const recordingEngine = ref('appium')  // 录制引擎：appium（经 Appium Server）或 airtest（直连设备 ADB）
 const selectedBrowser = ref('chrome')  // 默认使用Chrome
@@ -951,7 +1001,7 @@ const parsedExecutionLogs = computed(() => {
 })
 
 // 优先使用结构化的步骤结果（后端 step_results，含每步成功/失败与错误），
-// Appium 的文本日志无法被 JSON.parse 时也能正确展示“失败到第几步”
+// Appium 的文本日志无法被 JSON.parse 时也能正确展示"失败到第几步"
 const stepResultList = computed(() => {
   const r = executionResult.value
   if (!r) return []
@@ -966,6 +1016,20 @@ const failedStepCount = computed(() => {
   const failed = stepResultList.value.find((s) => s.success === false)
   return failed ? failed.step_number : 0
 })
+
+// 每步截图预览辅助
+const getStepScreenshotList = () => {
+  return (executionResult.value?.step_results || [])
+    .map(s => s.screenshot).filter(Boolean)
+}
+const getStepScreenshotIndex = (idx) => {
+  let screenshotIdx = -1
+  const steps = executionResult.value?.step_results || []
+  for (let i = 0; i <= idx && i < steps.length; i++) {
+    if (steps[i]?.screenshot) screenshotIdx++
+  }
+  return Math.max(0, screenshotIdx)
+}
 
 // 结果标题：根据真实状态展示 执行中/执行成功/执行失败
 const resultTagType = computed(() => {
@@ -1027,7 +1091,9 @@ const onProjectChange = async () => {
   await Promise.all([
     loadTestCases(),
     loadElements()
-  ])
+  ]).catch((e) => {
+    console.error('加载用例或元素失败:', e)
+  })
 }
 
 const selectTestCase = async (testCase) => {
@@ -1067,6 +1133,47 @@ const selectTestCase = async (testCase) => {
   // 只有在切换到不同用例时才清空执行结果
   executionResult.value = null
   showSteps.value = true
+  // 加载该用例的执行历史记录
+  executionHistory.value = []
+  selectedHistoryId.value = null
+  loadExecutionHistory(testCase.id)
+}
+
+// 加载用例的执行历史记录
+const loadExecutionHistory = async (testCaseId) => {
+  if (!testCaseId) return
+  historyLoading.value = true
+  try {
+    const response = await getTestCaseExecutions({ test_case: testCaseId, page_size: 20 })
+    const data = response.data
+    executionHistory.value = data.results || data || []
+  } catch (e) {
+    executionHistory.value = []
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+// 查看某条历史执行记录，回显步骤结果/日志/截图
+const viewExecution = async (record) => {
+  selectedHistoryId.value = record.id
+  try {
+    const res = await getTestCaseExecution(record.id)
+    const d = res.data
+    executionResult.value = {
+      success: d.status === 'passed',
+      status: d.status,
+      logs: d.execution_logs || '',
+      step_results: d.step_results || [],
+      error_message: d.error_message || '',
+      screenshots: d.screenshots || [],
+      execution_time: d.execution_time || 0
+    }
+    resultActiveTab.value = 'steps'
+    showSteps.value = false
+  } catch (e) {
+    ElMessage.error('加载执行记录失败')
+  }
 }
 
 const addStep = () => {
@@ -1196,7 +1303,7 @@ const runTestCase = async (testCase) => {
 
     const response = await runTestCaseApi(testCase.id, requestData)
 
-    // run() 接口只表示“任务已提交”，真实结果在后台线程异步执行。
+    // run() 接口只表示"任务已提交"，真实结果在后台线程异步执行。
     // 必须轮询执行详情，拿真实状态(status)和每步结果(step_results)。
     const executionId = response.data.execution_id
     if (executionId) {
@@ -1284,13 +1391,17 @@ const pollExecutionResult = async (executionId) => {
     step_results: lastData?.step_results || [],
     error_message: lastData?.error_message || ''
   }
-  // 完成后优先展示“步骤结果”，让用户直接看到失败到第几步
+  // 完成后优先展示"步骤结果"，让用户直接看到失败到第几步
   resultActiveTab.value = 'steps'
   showSteps.value = false
   if (isSuccess) {
     ElMessage.success('测试用例执行成功')
   } else {
     ElMessage.error(`测试用例执行失败（${finalStatus === 'failed' ? '步骤执行失败' : '执行异常'}）`)
+  }
+  // 执行完成后刷新历史记录列表
+  if (selectedTestCase.value?.id) {
+    loadExecutionHistory(selectedTestCase.value.id)
   }
 }
 
@@ -1597,16 +1708,35 @@ const previewScreenshot = (screenshot) => {
   showScreenshotPreview.value = true
 }
 
-// 加载 App 自动化设备和应用
+// 加载 App 自动化设备和应用（合并旧版 ui-automation + 新版 app-automation 设备源）
 const loadAppDevicesAndConfigs = async () => {
   try {
-    const [devicesRes, configsRes] = await Promise.allSettled([
+    const [devicesRes, newDevicesRes, configsRes] = await Promise.allSettled([
       getAppDevices({ status: 'online', page_size: 999 }),
+      getNewDeviceList({ status: 'online', page_size: 999 }),
       getAppConfigs({ page_size: 999 })
     ])
-    if (devicesRes.status === 'fulfilled') {
-      appDevices.value = devicesRes.value.data.results || devicesRes.value.data || []
+    // 合并新旧设备源，按 udid/device_id 去重（新版优先）
+    const oldDevices = (devicesRes.status === 'fulfilled')
+      ? (devicesRes.value.data.results || devicesRes.value.data || [])
+      : []
+    const newDevices = (newDevicesRes.status === 'fulfilled')
+      ? (newDevicesRes.value.data.results || newDevicesRes.value.data || [])
+      : []
+    const idSet = new Set()
+    const merged = []
+    for (const d of [...newDevices, ...oldDevices]) {
+      const idKey = d.udid || d.device_id || d.id
+      if (!idSet.has(idKey)) {
+        idSet.add(idKey)
+        // 统一字段，兼容新旧两套设备表（旧表用 udid，新表用 device_id）
+        d.device_id = d.udid || d.device_id || d.id
+        if (!d.platform) d.platform = 'android'  // 新表仅 Android
+        if (!d.name) d.name = d.device_id
+        merged.push(d)
+      }
     }
+    appDevices.value = merged
     if (configsRes.status === 'fulfilled') {
       appConfigs.value = configsRes.value.data.results || configsRes.value.data || []
     }
@@ -1699,7 +1829,7 @@ const addDumpedElementAsStep = async (element) => {
 }
 
 const getDeviceLabel = () => {
-  const d = appDevices.value.find(x => x.id === selectedDeviceId.value)
+  const d = appDevices.value.find(x => x.device_id === selectedDeviceId.value)
   return d ? `${d.name} (${d.platform})` : ''
 }
 
@@ -1866,8 +1996,7 @@ const openRecording = async () => {
       app_config_id: selectedAppConfigId.value,
       project_id: realProjectId.value,
       case_name: '',
-      // UI(Web) 模块不暴露 Airtest 引擎，强制回退为 appium；App 模块沿用用户选择
-      engine: isAppModule.value ? recordingEngine.value : 'appium'
+      engine: recordingEngine.value
     })
     if (response.data.success) {
       recording.value = true
@@ -1914,7 +2043,7 @@ const openContinueRecording = async () => {
       app_config_id: selectedAppConfigId.value,
       project_id: realProjectId.value,
       case_name: selectedTestCase.value.name,
-      engine: isAppModule.value ? recordingEngine.value : 'appium',
+      engine: recordingEngine.value,
       continue_case_id: selectedTestCase.value.id,  // 关键：告知后端这是继续录制
     })
     if (response.data.success) {
@@ -2211,6 +2340,12 @@ const onRecordDialogClose = () => {
 
 // 监听引擎切换，加载 Appium/Airtest 数据
 watch(selectedEngine, (newVal) => {
+  // 引擎切换时同步录制引擎：选 Airtest → 录制也走 Airtest；选 Appium → 默认 Appium（用户可切纯 Airtest）
+  if (newVal === 'airtest') {
+    recordingEngine.value = 'airtest'
+  } else if (newVal === 'appium') {
+    recordingEngine.value = 'appium'
+  }
   if (newVal === 'appium' || newVal === 'airtest') {
     loadAppDevicesAndConfigs()
   }
@@ -2221,7 +2356,9 @@ onMounted(async () => {
   await loadProjects()
 
   if (allProjects.value.length > 0) {
-    projectId.value = allProjects.value[0].id
+    const qp = route.query.project
+    const initId = (qp && allProjects.value.some(p => p.id === qp)) ? qp : allProjects.value[0].id
+    projectId.value = initId
     await onProjectChange()
   }
 
@@ -2791,6 +2928,25 @@ onMounted(async () => {
   align-items: center;
   gap: 10px;
   margin-bottom: 8px;
+
+  .step-screenshot-thumb {
+    flex: 0 0 auto;
+    width: 72px;
+    height: 44px;
+    border-radius: 4px;
+    overflow: hidden;
+    cursor: pointer;
+    border: 1px solid #dcdfe6;
+    transition: border-color 0.2s;
+
+    &:hover { border-color: #409eff; }
+
+    :deep(.el-image) {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+  }
 }
 
 .log-action {
@@ -3112,4 +3268,84 @@ onMounted(async () => {
   justify-content: center;
   height: 100%;
 }
+/* 执行记录历史面板 */
+.execution-history {
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  margin-bottom: 16px;
+  background: #fafafa;
+}
+.history-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+  font-size: 14px;
+  color: #303133;
+}
+.history-header .history-title {
+  flex: 0 0 auto;
+}
+.history-header .history-spacer {
+  flex: 1;
+}
+.history-header .collapse-icon {
+  transition: transform 0.2s;
+}
+.history-header .collapse-icon.is-collapsed {
+  transform: rotate(-90deg);
+}
+.history-body {
+  padding: 0 14px 12px 14px;
+}
+.history-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #909399;
+  font-size: 13px;
+  padding: 8px 0;
+}
+.history-list {
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  background: white;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+.history-item:hover {
+  border-color: #409eff;
+  background: #f0f8ff;
+}
+.history-item.active {
+  border-color: #409eff;
+  background: #ecf5ff;
+}
+.history-engine {
+  color: #606266;
+  font-weight: 500;
+}
+.history-time {
+  color: #909399;
+}
+.history-duration,
+.history-creator {
+  color: #c0c4cc;
+}
+
 </style>

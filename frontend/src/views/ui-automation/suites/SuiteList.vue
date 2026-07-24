@@ -255,9 +255,9 @@
             <el-select v-model="runConfig.device_id" placeholder="请选择测试设备" filterable style="width: 100%">
               <el-option
                 v-for="d in appDevices"
-                :key="d.id"
+                :key="d.device_id || d.id"
                 :label="`${d.name} (${d.platform}) - ${d.status}`"
-                :value="d.id"
+                :value="d.device_id"
                 :disabled="d.status !== 'online'"
               />
             </el-select>

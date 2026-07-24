@@ -60,6 +60,12 @@
           </template>
         </el-table-column>
         <el-table-column prop="udid" label="UDID" min-width="160" show-overflow-tooltip />
+        <el-table-column prop="adb_host" label="电脑IP(ADB)" width="140">
+          <template #default="{ row }">
+            <span v-if="row.adb_host">{{ row.adb_host }}</span>
+            <el-tag v-else size="small" type="info">本机</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
             <el-tag
@@ -133,6 +139,10 @@
         </el-form-item>
         <el-form-item label="UDID" prop="udid">
           <el-input v-model="form.udid" placeholder="设备唯一标识" />
+        </el-form-item>
+        <el-form-item label="电脑IP(ADB)" prop="adb_host">
+          <el-input v-model="form.adb_host" placeholder="手机USB所在电脑的IP，如 192.168.8.71（留空则用本机）" />
+          <div class="form-hint">多人使用时必填：填你电脑的 IP，平台通过你电脑的 ADB 服务控制手机</div>
         </el-form-item>
         <el-form-item label="服务地址" prop="appium_server_url">
           <el-input
@@ -222,6 +232,7 @@ const defaultForm = {
   platform_version: '',
   device_type: 'real',
   udid: '',
+  adb_host: '',
   appium_server_url: 'http://localhost:4723',
   resolution: '',
   capabilities: {},
@@ -291,6 +302,7 @@ const handleEdit = (row) => {
     platform_version: row.platform_version || '',
     device_type: row.device_type || 'real',
     udid: row.udid,
+    adb_host: row.adb_host || '',
     appium_server_url: row.appium_server_url,
     resolution: row.resolution || '',
     capabilities: row.capabilities || {},

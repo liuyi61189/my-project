@@ -46,8 +46,8 @@ export function useUnifiedProjects() {
     if (project.source === 'proj') {
       try {
         const res = await ensureUiProject(project.real_id)
-        // 刷新项目列表以包含新创建的 UiProject
-        await loadProjects()
+        // 后台静默刷新项目列表，不阻塞当前操作（避免 el-select 选项重建导致选中态丢失）
+        loadProjects().catch(() => {})
         return res.data.id
       } catch (e) {
         console.error('Failed to ensure UI project:', e)
