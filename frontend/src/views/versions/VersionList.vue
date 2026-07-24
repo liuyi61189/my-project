@@ -192,52 +192,58 @@
           <el-button type="primary" size="small" @click="openCreateModuleDialog" :disabled="!manageVersion?.projects?.length">
             <el-icon><Plus /></el-icon> 新增功能模块
           </el-button>
-          <el-button size="small" @click="openLinkModuleDialog" :disabled="!manageVersion?.projects?.length">
-            <el-icon><Link /></el-icon> 关联已有模块
-          </el-button>
         </div>
 
         <!-- 功能模块列表 -->
         <div v-if="moduleLoading" class="loading-wrapper">
           <el-loading />
         </div>
-        <div v-else-if="!modulesList.length" class="empty-modules">
+        <div v-else-if="!hasModules" class="empty-modules">
           <el-empty description="暂无功能模块，点击上方按钮创建" />
         </div>
         <div v-else class="modules-list">
-          <div v-for="module in modulesList" :key="module.id" class="module-card">
-            <div class="module-header" @click="toggleModule(module.id)">
-              <el-icon class="toggle-icon" :class="{ expanded: expandedModules.has(module.id) }">
-                <ArrowRight />
-              </el-icon>
-              <span class="module-name">{{ module.name }}</span>
-              <span class="module-project">{{ module.project?.name }}</span>
-              <el-tag size="small" type="info">{{ module.test_points_count || 0 }} 个测试点</el-tag>
-              <div class="module-actions" @click.stop>
-                <el-button size="small" text type="primary" @click="openEditModule(module)"><el-icon><Edit /></el-icon></el-button>
-                <el-button size="small" text type="danger" @click="deleteModule(module)"><el-icon><Delete /></el-icon></el-button>
-                <el-button size="small" text type="success" @click="openCreateTestPoint(module)"><el-icon><Plus /></el-icon>测试点</el-button>
+          <template v-for="grp in moduleGroups" :key="grp.label">
+            <div v-if="grp.modules.length" class="module-group">
+              <div class="module-group-header">
+                <span class="group-title">{{ grp.label }}</span>
+                <span class="group-count">{{ grp.modules.length }}</span>
+                <span v-if="grp.unassociated" class="group-hint">未关联版本，可在「编辑」中关联到本版本</span>
               </div>
-            </div>
-            <div v-show="expandedModules.has(module.id)" class="module-body">
-              <div v-if="module.testPointsLoading" class="loading-small">
-                <el-loading text="加载测试点中..." />
-              </div>
-              <div v-else-if="!module.testPoints?.length" class="no-testpoints">
-                暂无测试点，点击上方「+ 测试点」按钮创建
-              </div>
-              <div v-else class="testpoints-list">
-                <div v-for="tp in module.testPoints" :key="tp.id" class="testpoint-item">
-                  <span class="tp-name">{{ tp.name }}</span>
-                  <span v-if="tp.description" class="tp-desc">{{ tp.description }}</span>
-                  <div class="tp-actions" @click.stop>
-                    <el-button size="small" text type="primary" @click="openEditTestPoint(tp, module)"><el-icon><Edit /></el-icon></el-button>
-                    <el-button size="small" text type="danger" @click="deleteTestPoint(tp, module)"><el-icon><Delete /></el-icon></el-button>
+              <div v-for="module in grp.modules" :key="module.id" class="module-card">
+                <div class="module-header" @click="toggleModule(module.id)">
+                  <el-icon class="toggle-icon" :class="{ expanded: expandedModules.has(module.id) }">
+                    <ArrowRight />
+                  </el-icon>
+                  <span class="module-name">{{ module.name }}</span>
+                  <span class="module-project">{{ module.project?.name }}</span>
+                  <el-tag size="small" type="info">{{ module.test_points_count || 0 }} 个测试点</el-tag>
+                  <div class="module-actions" @click.stop>
+                    <el-button size="small" text type="primary" @click="openEditModule(module)"><el-icon><Edit /></el-icon></el-button>
+                    <el-button size="small" text type="danger" @click="deleteModule(module)"><el-icon><Delete /></el-icon></el-button>
+                    <el-button size="small" text type="success" @click="openCreateTestPoint(module)"><el-icon><Plus /></el-icon>测试点</el-button>
+                  </div>
+                </div>
+                <div v-show="expandedModules.has(module.id)" class="module-body">
+                  <div v-if="module.testPointsLoading" class="loading-small">
+                    <el-loading text="加载测试点中..." />
+                  </div>
+                  <div v-else-if="!module.testPoints?.length" class="no-testpoints">
+                    暂无测试点，点击上方「+ 测试点」按钮创建
+                  </div>
+                  <div v-else class="testpoints-list">
+                    <div v-for="tp in module.testPoints" :key="tp.id" class="testpoint-item">
+                      <span class="tp-name">{{ tp.name }}</span>
+                      <span v-if="tp.description" class="tp-desc">{{ tp.description }}</span>
+                      <div class="tp-actions" @click.stop>
+                        <el-button size="small" text type="primary" @click="openEditTestPoint(tp, module)"><el-icon><Edit /></el-icon></el-button>
+                        <el-button size="small" text type="danger" @click="deleteTestPoint(tp, module)"><el-icon><Delete /></el-icon></el-button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
-          </div>
+          </template>
         </div>
       </div>
     </el-dialog>
@@ -279,30 +285,6 @@
       </template>
     </el-dialog>
 
-    <!-- 关联已有模块弹窗 -->
-    <el-dialog v-model="linkModuleVisible" title="关联已有模块" width="500px" :close-on-click-modal="false">
-      <div v-if="linkLoading" class="loading-wrapper"><el-loading /></div>
-      <div v-else-if="!linkableModules.length" class="empty-modules">
-        <el-empty description="项目中暂无其他可关联的模块" />
-      </div>
-      <div v-else>
-        <div style="color:#909399;font-size:12px;margin-bottom:10px">
-          勾选要关联到「{{ manageVersion?.name }}」的模块（仅显示尚未关联本版本的模块）
-        </div>
-        <el-checkbox-group v-model="selectedLinkModuleIds" style="width:100%">
-          <div v-for="m in linkableModules" :key="m.id" class="link-module-item">
-            <el-checkbox :label="m.id" :value="m.id">{{ m.name }}</el-checkbox>
-            <span class="link-module-project">{{ m.project?.name }}</span>
-          </div>
-        </el-checkbox-group>
-      </div>
-      <template #footer>
-        <el-button @click="linkModuleVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveLinkModules" :loading="linkSaving" :disabled="!selectedLinkModuleIds.length">确认关联</el-button>
-      </template>
-    </el-dialog>
-
-
     <!-- 新增/编辑测试点弹窗 -->
     <el-dialog v-model="createTestPointVisible" :title="editingTestPointId ? '编辑测试点' : '新增测试点'" width="450px" :close-on-click-modal="false">
       <el-form :model="testPointForm" ref="testPointFormRef" label-width="90px" :rules="testPointRules">
@@ -325,9 +307,9 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Search, Delete, ArrowRight, Edit, Link } from '@element-plus/icons-vue'
+import { Plus, Search, Delete, ArrowRight, Edit } from '@element-plus/icons-vue'
 import api from '@/utils/api'
 import dayjs from 'dayjs'
 
@@ -366,67 +348,23 @@ const manageDialogVisible = ref(false)
 const manageVersion = ref(null)
 const modulesList = ref([])
 const moduleLoading = ref(false)
+// 模块管理弹窗中的分组：属于本版本的归「已关联」，未填写版本的归「未关联版本」
+const moduleGroups = computed(() => {
+  const vid = manageVersion.value?.id
+  const matched = []
+  const unassociated = []
+  for (const m of modulesList.value) {
+    const versions = m.versions || []
+    if (vid && versions.some(v => v.id === vid)) matched.push(m)
+    else if (versions.length === 0) unassociated.push(m)
+  }
+  return [
+    { label: `已关联「${manageVersion.value?.name || ''}」`, modules: matched, unassociated: false },
+    { label: '未关联版本', modules: unassociated, unassociated: true }
+  ]
+})
+const hasModules = computed(() => moduleGroups.value.some(g => g.modules.length))
 const expandedModules = ref(new Set())
-
-// 关联已有模块
-const linkModuleVisible = ref(false)
-const linkLoading = ref(false)
-const linkSaving = ref(false)
-const linkableModules = ref([])
-const selectedLinkModuleIds = ref([])
-
-const openLinkModuleDialog = async () => {
-  linkModuleVisible.value = true
-  linkLoading.value = true
-  selectedLinkModuleIds.value = []
-  try {
-    const projectIds = manageVersion.value.projects.map(p => p.id)
-    const allModules = []
-    for (const pid of projectIds) {
-      const res = await api.get(`/feature-modules/projects/${pid}/modules/`)
-      allModules.push(...(res.data || []))
-    }
-    // 去重
-    const seen = new Set()
-    const unique = allModules.filter(m => {
-      if (seen.has(m.id)) return false
-      seen.add(m.id)
-      return true
-    })
-    // 仅显示尚未关联当前版本的模块
-    const vid = manageVersion.value.id
-    linkableModules.value = unique.filter(m => {
-      const vs = m.versions || []
-      return !vs.some(v => v.id === vid)
-    })
-  } catch {
-    linkableModules.value = []
-  } finally {
-    linkLoading.value = false
-  }
-}
-
-const saveLinkModules = async () => {
-  if (!selectedLinkModuleIds.value.length) return
-  linkSaving.value = true
-  try {
-    const vid = manageVersion.value.id
-    // 逐个模块追加关联当前版本（保留其原有版本）
-    for (const mid of selectedLinkModuleIds.value) {
-      const m = linkableModules.value.find(x => x.id === mid)
-      const existing = (m?.versions || []).map(v => v.id)
-      const newVersions = existing.includes(vid) ? existing : [...existing, vid]
-      await api.put(`/feature-modules/${mid}/`, { version_ids: newVersions })
-    }
-    ElMessage.success(`已关联 ${selectedLinkModuleIds.value.length} 个模块到 ${manageVersion.value.name}`)
-    linkModuleVisible.value = false
-    await fetchModulesForVersion()
-  } catch {
-    ElMessage.error('关联模块失败')
-  } finally {
-    linkSaving.value = false
-  }
-}
 
 const fetchModulesForVersion = async () => {
   if (!manageVersion.value?.projects?.length) {
@@ -974,6 +912,36 @@ onMounted(() => {
     flex-direction: column;
     gap: 8px;
   }
+
+  .module-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .module-group-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 0 2px;
+    padding: 4px 8px;
+    background: var(--el-fill-color-light, #f5f7fa);
+    border-radius: 4px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--el-text-color-primary, #303133);
+  }
+
+  .module-group-header .group-count {
+    color: var(--el-color-primary, #409eff);
+  }
+
+  .module-group-header .group-hint {
+    font-weight: 400;
+    font-size: 12px;
+    color: var(--el-text-color-secondary, #909399);
+  }
+
 
   .module-card {
     border: 1px solid #e4e7ed;
