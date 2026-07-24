@@ -157,6 +157,24 @@ export function importGeneratedToAICase(data) {
   })
 }
 
+// 一键采纳墨刀流程生成的用例到用例库（按项目/版本/功能模块自动建模块，幂等）
+export function adoptModaoToLibrary(pk, data = {}) {
+  return request({
+    url: `/requirement-analysis/api/modao/${pk}/adopt/`,
+    method: 'post',
+    data
+  })
+}
+
+// 逐条采纳墨刀流程生成的单条测试用例到用例库（幂等）
+export function adoptModaoSingleCase(pk, caseIndex) {
+  return request({
+    url: `/requirement-analysis/api/modao/${pk}/adopt-single/`,
+    method: 'post',
+    data: { index: caseIndex }
+  })
+}
+
 // ==================== 需求拆解结果历史 ====================
 
 // 获取拆解结果历史列表
