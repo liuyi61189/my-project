@@ -273,23 +273,21 @@ class AirtestRecordingEngine:
                 raise ValueError(f"不支持的操作类型: {action_type}")
 
             result['success'] = True
+            # 每步成功后自动截屏，返回 base64 供前端逐步查看
+            try:
+                b64 = self.get_screenshot_base64()
+                result['screenshot'] = f'data:image/png;base64,{b64}' if b64 else None
+            except Exception:
+                result['screenshot'] = None
         except Exception as e:
             result['success'] = False
             result['error'] = str(e)
-            # 失败时自动截屏，保存到 media 目录供前端展示
+            # 失败时自动截屏，返回 base64 供前端展示
             try:
-                import os
-                from django.conf import settings
-                shot = self.device.snapshot()
-                if shot:
-                    ts = __import__('time').time()
-                    fname = f'airtest_fail_{int(ts*1000)}.png'
-                    fpath = os.path.join(settings.MEDIA_ROOT, 'screenshots', fname)
-                    os.makedirs(os.path.dirname(fpath), exist_ok=True)
-                    shot.save(fpath)
-                    result['screenshot'] = f'screenshots/{fname}'
+                b64 = self.get_screenshot_base64()
+                result['screenshot'] = f'data:image/png;base64,{b64}' if b64 else None
             except Exception:
-                pass
+                result['screenshot'] = None
         return result
 
     # ---- 具体操作（坐标走 input tap/swipe，与 uiautomator 同坐标系；rid 优先用 Poco） ----
@@ -356,9 +354,10 @@ class AirtestRecordingEngine:
             self.device.shell('input keyevent 67')
 
     def _swipe_points(self, element, direction, ratio):
-        raw = (element.get('input_value') or '') if False else direction
-        if element.get('input_value'):
-            parts = str(element['input_value']).split(',')
+        # 优先把 direction(即 record_action 传入的 input_value) 解析为坐标 "x1,y1,x2,y2"。
+        # 录制时前端两点滑动传的就是 "sx,sy,ex,ey"，必须按坐标滑动而非忽略。
+        if direction:
+            parts = str(direction).split(',')
             if len(parts) == 4:
                 try:
                     return (int(parts[0]), int(parts[1])), (int(parts[2]), int(parts[3]))

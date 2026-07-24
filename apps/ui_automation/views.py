@@ -69,6 +69,11 @@ def infer_appium_action_type(text):
     return 'click'
 
 
+def _infer_web_action_type(text):
+    """根据步骤文字推断 Web/Playwright 操作类型（与 Appium 版基本一致，不含 launch_app/swipe 等）"""
+    return infer_appium_action_type(text)
+
+
 def extract_step_input_value(text):
     """从步骤文字中提取输入值（冒号/引号后的内容）"""
     if not text:
@@ -151,6 +156,15 @@ class StandardPagination(PageNumberPagination):
     max_page_size = 1000
 
 
+# AI 项目状态 → UI 项目状态 映射
+_UI_AI_STATUS_MAP = {
+    'active': 'IN_PROGRESS',
+    'paused': 'NOT_STARTED',
+    'completed': 'COMPLETED',
+    'archived': 'COMPLETED',
+}
+
+
 class UiProjectViewSet(OwnerOrMemberMixin, viewsets.ModelViewSet):
     queryset = UiProject.objects.all()
     permission_classes = [IsAuthenticated]
@@ -166,6 +180,75 @@ class UiProjectViewSet(OwnerOrMemberMixin, viewsets.ModelViewSet):
         elif self.action in ['update', 'partial_update']:
             return UiProjectUpdateSerializer
         return UiProjectSerializer
+
+    def list(self, request, *args, **kwargs):
+        """
+        列表：合并 UI 自动化项目 + AI 用例生成项目（全局统一项目源）
+        AI 项目标记 source='ai' 且 id 带 proj_ 前缀，前端据此禁用编辑/删除
+        """
+        from rest_framework.response import Response
+
+        # 1) 原生 UI 项目（全部取出，后续与 AI 项目一起手动分页）
+        queryset = self.filter_queryset(self.get_queryset())
+        ui_results = self.get_serializer(queryset, many=True).data
+
+        # 2) AI 用例生成项目（apps.projects.Project）
+        from apps.projects.models import Project as AiProject
+        from apps.testcases.models import TestCase as AiTestCase
+        search = request.query_params.get('search', '').strip()
+        status = request.query_params.get('status', '').strip()
+        try:
+            ai_qs = AiProject.objects.all().prefetch_related('members', 'owner')
+            if search:
+                ai_qs = ai_qs.filter(name__icontains=search)
+            ai_projects = ai_qs
+        except Exception as e:
+            logger.warning('UI项目管理加载AI项目失败: %s', e)
+            ai_projects = []
+
+        ai_results = []
+        for p in ai_projects:
+            mapped_status = _UI_AI_STATUS_MAP.get(p.status, 'IN_PROGRESS')
+            if status and mapped_status != status:
+                continue
+            ai_results.append({
+                'id': f'proj_{p.id}',
+                'real_id': p.id,
+                'name': p.name,
+                'description': p.description or '',
+                'status': mapped_status,
+                'base_url': '',
+                'start_date': None,
+                'end_date': None,
+                'owner_name': p.owner.username if p.owner else None,
+                'member_count': p.members.count(),
+                'test_case_count': AiTestCase.objects.filter(project=p).count(),
+                'created_at': p.created_at.isoformat() if p.created_at else None,
+                'updated_at': p.updated_at.isoformat() if p.updated_at else None,
+                'source': 'ai',
+            })
+
+        # 3) 合并（UI 项目在前，AI 项目在后）
+        merged = list(ui_results) + ai_results
+
+        # 4) 手动分页（保持与前端分页参数兼容）
+        try:
+            page_size = int(request.query_params.get('page_size', 20))
+            page = int(request.query_params.get('page', 1))
+        except (TypeError, ValueError):
+            page_size, page = 20, 1
+        page_size = max(page_size, 1)
+        page = max(page, 1)
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_data = merged[start:end]
+
+        return Response({
+            'count': len(merged),
+            'next': None,
+            'previous': None,
+            'results': page_data,
+        })
 
     def perform_create(self, serializer):
         # 创建项目时，当前用户自动成为负责人
@@ -947,7 +1030,12 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         # 只显示用户有权限访问的项目的测试用例
         user = self.request.user
         accessible_projects = filter_by_owner_or_member(UiProject.objects.all(), user)
-        return TestCase.objects.filter(project__in=accessible_projects).select_related('project', 'created_by')
+        qs = TestCase.objects.filter(project__in=accessible_projects).select_related('project', 'created_by')
+        # 按 tags 筛选（如 tags=冒烟）
+        tag_filter = self.request.query_params.get('tags')
+        if tag_filter:
+            qs = qs.filter(tags__contains=[tag_filter])
+        return qs
 
     def perform_create(self, serializer):
         # 创建测试用例
@@ -1276,14 +1364,15 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='convert-from-testcases')
     def convert_from_testcases(self, request):
-        """将用例库（apps.testcases.TestCase）用例转换为 UI 自动化结构化用例（用于 Appium App 自动化）。
-        自动拆步骤骨架，交互步骤生成占位 Element（locator_value 留 'TODO_待补充控件定位器'），
-        用户后续在「UI自动化测试→元素管理」回填控件定位器即可用 Appium 引擎执行。
+        """将用例库用例转换为 UI 自动化结构化用例。
+        mode='web'(默认): 生成 Web/Playwright 用例（通用 click/fill/assert）
+        mode='appium':     生成 Appium App 用例（含 launch_app、swipe 等）
         """
         from apps.testcases.models import TestCase as LibTestCase
 
         case_ids = request.data.get('case_ids', [])
         ui_project_id = request.data.get('ui_project_id')
+        mode = request.data.get('mode', 'web')  # 'web' | 'appium'
 
         if not case_ids:
             return Response({'success': False, 'message': '请选择要转换的用例'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1311,9 +1400,16 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             except LibTestCase.DoesNotExist:
                 continue
 
-            # 同项目同名用例跳过，避免重复转换
-            if TestCase.objects.filter(project=ui_project, name=src.title).exists():
-                continue
+            # 同项目同名用例自动加序号后缀，避免被跳过
+            base_name = src.title
+            name_suffix = ''
+            existing_names = set(TestCase.objects.filter(project=ui_project).values_list('name', flat=True))
+            if base_name in existing_names:
+                for i in range(1, 100):
+                    candidate = f"{base_name}({i})"
+                    if candidate not in existing_names:
+                        name_suffix = f"({i})"
+                        break
 
             desc_parts = []
             if src.preconditions:
@@ -1324,7 +1420,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 desc_parts.append(src.description)
 
             ui_case = TestCase.objects.create(
-                name=src.title,
+                name=base_name + name_suffix,
                 description="\n".join(desc_parts),
                 project=ui_project,
                 priority=priority_map.get(src.priority, 'medium'),
@@ -1340,7 +1436,19 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                     for i, line in enumerate(l for l in src.steps.splitlines() if l.strip())
                 ]
 
-            # 预创建高频元素（确认按钮等），供后续步骤复用
+            step_num = 1
+
+            # === Appium 模式：插入启动 App 步骤 ===
+            if mode == 'appium':
+                TestCaseStep.objects.create(
+                    test_case=ui_case, step_number=step_num,
+                    action_type='launch_app',
+                    description='启动应用',
+                    wait_time=2000,
+                )
+                step_num += 1
+
+            # 预创建高频元素（仅 appium 模式）
             def get_sure_btn():
                 return Element.objects.get_or_create(
                     project=ui_project,
@@ -1352,55 +1460,45 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                     }
                 )[0]
 
-            step_num = 1
-
-            # 第一步：启动 App
-            TestCaseStep.objects.create(
-                test_case=ui_case, step_number=step_num,
-                action_type='launch_app',
-                description='启动万年历应用',
-                wait_time=2000,
-            )
-            step_num += 1
-
             for s in step_objs:
                 action_text = getattr(s, 'action', '') or ''
                 expected_text = getattr(s, 'expected', '') or ''
-                atype = infer_appium_action_type(action_text)
 
-                # 检查是否是"选中N个月/年后"的滑动模式
-                swipe_pattern = parse_swipe_pattern(action_text)
-                if swipe_pattern:
-                    wheel_type, times = swipe_pattern
-                    coords = get_wheel_coords().get(wheel_type, (585, 2228, 585, 2078))
-                    swipe_input = f"{coords[0]},{coords[1]},{coords[2]},{coords[3]}"
-                    wheel_label = {"month":"月","year":"年","day":"日"}.get(wheel_type, "月")
-                    for i in range(times):
+                # === Appium 模式：滑动模式解析 ===
+                if mode == 'appium':
+                    swipe_pattern = parse_swipe_pattern(action_text)
+                    if swipe_pattern:
+                        wheel_type, times = swipe_pattern
+                        coords = get_wheel_coords().get(wheel_type, (585, 2228, 585, 2078))
+                        swipe_input = f"{coords[0]},{coords[1]},{coords[2]},{coords[3]}"
+                        wheel_label = {"month":"月","year":"年","day":"日"}.get(wheel_type, "月")
+                        for i in range(times):
+                            TestCaseStep.objects.create(
+                                test_case=ui_case, step_number=step_num,
+                                action_type='swipe',
+                                description=f'在{wheel_label}滚轮上滑动1个{wheel_label}({i+1}/{times})',
+                                input_value=swipe_input,
+                                wait_time=500,
+                            )
+                            step_num += 1
+                        sure_btn = get_sure_btn()
                         TestCaseStep.objects.create(
                             test_case=ui_case, step_number=step_num,
-                            action_type='swipe',
-                            description=f'在{wheel_label}滚轮上滑动1个{wheel_label}({i+1}/{times})',
-                            input_value=swipe_input,
-                            wait_time=500,
+                            action_type='click', element=sure_btn,
+                            description='点击确认按钮，关闭选择器',
                         )
                         step_num += 1
-                    # 滑动完成后自动插入确认按钮
-                    sure_btn = get_sure_btn()
-                    TestCaseStep.objects.create(
-                        test_case=ui_case, step_number=step_num,
-                        action_type='click', element=sure_btn,
-                        description='点击确认按钮，关闭选择器',
-                    )
-                    step_num += 1
-                    # 不再生成原来的 click 步骤（swipe 模式已包含确认）
-                    continue
+                        continue
+
+                # 通用步骤生成（Web 和 Appium 共用）
+                atype = infer_appium_action_type(action_text) if mode == 'appium' else _infer_web_action_type(action_text)
 
                 matched_strategy, matched_value = smart_match_locator(action_text)
                 elem = Element.objects.create(
                     project=ui_project,
                     name=(action_text[:50] or f'步骤{step_num}')[:50],
                     locator_strategy=LocatorStrategy.objects.filter(name=matched_strategy.upper()).first() if matched_strategy else default_strategy,
-                    locator_value=matched_value if matched_value else 'TODO_待补充控件定位器',
+                    locator_value=matched_value if matched_value else ('TODO_待补充元素定位器' if mode == 'web' else 'TODO_待补充控件定位器'),
                     element_type=('INPUT' if atype in ('fill', 'input') else 'TEXT' if atype == 'assert' else 'BUTTON'),
                     description=action_text
                 )
@@ -1424,7 +1522,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                     project=ui_project,
                     name=f'断言_{src.title[:30]}'[:50],
                     locator_strategy=LocatorStrategy.objects.filter(name=matched_strategy2.upper()).first() if matched_strategy2 else default_strategy,
-                    locator_value=matched_value2 if matched_value2 else 'TODO_待补充控件定位器',
+                    locator_value=matched_value2 if matched_value2 else ('TODO_待补充元素定位器' if mode == 'web' else 'TODO_待补充控件定位器'),
                     element_type='TEXT',
                     description='用例预期结果断言'
                 )
@@ -1564,13 +1662,28 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                         }]
                     }, status=status.HTTP_400_BAD_REQUEST)
 
-                # 加载设备和应用配置
+                # 加载设备和应用配置（统一使用 app_automation 设备表）
                 try:
-                    device = AppDevice.objects.get(id=device_id)
+                    from apps.app_automation.models import AppDevice as AutoAppDevice
+                    _raw_device = AutoAppDevice.objects.get(device_id=device_id)
                     app_config = AppConfig.objects.get(id=app_config_id)
-                except AppDevice.DoesNotExist:
+                    # 字段映射：app_automation.AppDevice → 执行引擎期望的接口
+                    class _DeviceAdapter:
+                        def __init__(self, d):
+                            self._d = d
+                        @property
+                        def udid(self): return self._d.device_id
+                        @property
+                        def platform(self): return 'android'
+                        @property
+                        def appium_server_url(self): return ''
+                        @property
+                        def capabilities(self): return {}
+                        def __getattr__(self, name): return getattr(self._d, name)
+                    device = _DeviceAdapter(_raw_device)
+                except Exception:
                     execution.status = 'failed'
-                    execution.error_message = f'设备不存在 (ID: {device_id})'
+                    execution.error_message = f'设备不存在 (device_id: {device_id})'
                     execution.finished_at = timezone.now()
                     execution.save()
                     return Response({'success': False, 'logs': execution.error_message}, status=status.HTTP_400_BAD_REQUEST)
@@ -1745,11 +1858,26 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 try:
-                    device = AppDevice.objects.get(id=device_id)
+                    from apps.app_automation.models import AppDevice as AutoAppDevice
+                    _raw_device = AutoAppDevice.objects.get(device_id=device_id)
                     app_config = AppConfig.objects.get(id=app_config_id)
-                except AppDevice.DoesNotExist:
+                    # 字段映射：app_automation.AppDevice → 执行引擎期望的接口
+                    class _DeviceAdapter:
+                        def __init__(self, d):
+                            self._d = d
+                        @property
+                        def udid(self): return self._d.device_id
+                        @property
+                        def platform(self): return 'android'
+                        @property
+                        def appium_server_url(self): return ''
+                        @property
+                        def capabilities(self): return {}
+                        def __getattr__(self, name): return getattr(self._d, name)
+                    device = _DeviceAdapter(_raw_device)
+                except Exception:
                     execution.status = 'failed'
-                    execution.error_message = f'设备不存在 (ID: {device_id})'
+                    execution.error_message = f'设备不存在 (device_id: {device_id})'
                     execution.finished_at = timezone.now()
                     execution.save()
                     return Response({'success': False, 'logs': execution.error_message}, status=status.HTTP_400_BAD_REQUEST)
@@ -1762,11 +1890,13 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
                 def run_airtest_test():
                     try:
+                        _adb_host = getattr(device, 'adb_host', None) or None
                         at_engine = AirtestRecordingEngine(
                             serial=device.udid,
                             platform=device.platform,
                             app_package=app_config.package_name,
                             wda_url=device.appium_server_url,
+                            adb_host=_adb_host,
                         )
                         at_engine.connect()
 
@@ -2008,7 +2138,8 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                                         'action_type': action_type,
                                         'description': description or '',
                                         'success': success,
-                                        'error': None if success else step_log
+                                        'error': None if success else step_log,
+                                        'screenshot': f'data:image/png;base64,{screenshot_base64}' if screenshot_base64 else None
                                     })
 
                                     if not success:
@@ -2197,7 +2328,8 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                                             'action_type': action_type,
                                             'description': description or '',
                                             'success': success,
-                                            'error': None if success else step_log
+                                            'error': None if success else step_log,
+                                            'screenshot': f'data:image/png;base64,{screenshot_base64}' if screenshot_base64 else None
                                         })
 
                                         # 如果步骤失败,保存截图
@@ -2794,7 +2926,8 @@ class UiScheduledTaskViewSet(viewsets.ModelViewSet):
                                                 'action_type': action_type,
                                                 'description': step_info['description'] or '',
                                                 'success': success,
-                                                'error': None if success else step_log
+                                                'error': None if success else step_log,
+                                                'screenshot': f'data:image/png;base64,{screenshot_base64}' if screenshot_base64 else None
                                             })
 
                                             if not success:
@@ -2870,7 +3003,8 @@ class UiScheduledTaskViewSet(viewsets.ModelViewSet):
                                                     'action_type': action_type,
                                                     'description': step_info['description'] or '',
                                                     'success': success,
-                                                    'error': None if success else step_log
+                                                    'error': None if success else step_log,
+                                                    'screenshot': f'data:image/png;base64,{screenshot_base64}' if screenshot_base64 else None
                                                 })
 
                                                 if not success:
@@ -4419,7 +4553,7 @@ def learn_elements(request):
         return Response({'success': False, 'message': '缺少 device_id 或 app_config_id'}, status=400)
 
     try:
-        device = get_object_or_404(AppDevice, id=device_id)
+        device = _resolve_recording_device(device_id)
         app_config = get_object_or_404(AppConfig, id=app_config_id)
 
         from .appium_engine import AppiumTestEngine
@@ -4489,6 +4623,40 @@ RECORDING_SESSIONS = {}
 
 def _recording_session_key(request):
     return request.user.id
+
+
+def _resolve_recording_device(device_id):
+    """兼容新旧两套设备表解析设备（录制/探测共用）。
+    优先查新表 app_automation.AppDevice(device_id)，回退旧表 ui_automation.AppDevice(udid)。
+    返回统一对象（含 udid/platform/appium_server_url/adb_host/name）。找不到抛 DoesNotExist。
+    """
+    import types as _types
+    from apps.app_automation.models import AppDevice as NewAppDevice
+
+    # 优先新表（主表，新版设备都在这里）
+    try:
+        nd = NewAppDevice.objects.get(device_id=device_id)
+        return _types.SimpleNamespace(
+            udid=nd.device_id,
+            platform='android',
+            appium_server_url='http://localhost:4723',
+            adb_host=getattr(nd, 'adb_host', '') or '',
+            name=nd.name or nd.device_id,
+            _source='new',
+        )
+    except NewAppDevice.DoesNotExist:
+        pass
+
+    # 回退旧表（ui_automation.AppDevice，用 udid 查询）
+    od = AppDevice.objects.get(udid=device_id)  # 找不到抛 DoesNotExist
+    return _types.SimpleNamespace(
+        udid=od.udid,
+        platform=od.platform or 'android',
+        appium_server_url=od.appium_server_url or 'http://localhost:4723',
+        adb_host=getattr(od, 'adb_host', '') or '',
+        name=od.name,
+        _source='old',
+    )
 
 
 def _close_recording_session(key):
@@ -4584,13 +4752,14 @@ def start_recording(request):
     project_id = request.data.get('project_id')
     case_name = (request.data.get('case_name') or '').strip()
     engine_type = (request.data.get('engine') or 'appium').lower()
+    logger.info(f"[start_recording] 收到请求: device_id={device_id}, engine={engine_type}, raw_engine={request.data.get('engine')!r}")
     continue_case_id = request.data.get('continue_case_id')  # 继续录制：已有用例 ID
 
     if not device_id or not app_config_id or not project_id:
         return Response({'success': False, 'message': '缺少 device_id / app_config_id / project_id'}, status=400)
 
     try:
-        device = get_object_or_404(AppDevice, id=device_id)
+        device = _resolve_recording_device(device_id)
         app_config = get_object_or_404(AppConfig, id=app_config_id)
         project = get_object_or_404(UiProject, id=project_id)
     except Exception as e:
@@ -4655,11 +4824,14 @@ def start_recording(request):
             from .airtest_engine import AirtestRecordingEngine
             # iOS 通过 Airtest 连接时不依赖 Appium，复用 appium_server_url 字段存放
             # WDA(WebDriverAgent) 的 HTTP 代理地址（如 http://host.docker.internal:8100）。
+            # adb_host：手机USB所在电脑的IP，后端通过该电脑的ADB服务控制设备
+            _adb_host = getattr(device, 'adb_host', None) or None  # None 则用默认 host.docker.internal
             engine = AirtestRecordingEngine(
                 serial=device.udid,
                 platform=device.platform,
                 app_package=app_config.package_name,
                 wda_url=device.appium_server_url,
+                adb_host=_adb_host,
             )
             engine.connect()
             try:
@@ -4809,6 +4981,8 @@ def record_action(request):
         'click', 'tap', 'double_tap', 'long_press', 'fill', 'input',
         'clear', 'assert', 'getText'
     )
+    # 滑动/滚动不需要元素定位，但需保留坐标信息（Airtest 引擎按坐标滑动依赖 center_x/center_y）
+    need_coords = action_type in ('swipe', 'scroll')
     if need_element:
         if not (element and element.get('value')):
             return Response({'success': False, 'message': '该操作需要提供目标元素'}, status=400)
@@ -4817,6 +4991,14 @@ def record_action(request):
             'locator_value': element.get('value'),
             'name': element.get('name') or element.get('chinese_name') or element.get('text') or '未命名元素',
             # 保留坐标信息，用于坐标点击（比 el.click() 更可靠）
+            'center_x': element.get('center_x'),
+            'center_y': element.get('center_y'),
+        }
+    elif need_coords:
+        element_data = {
+            'locator_strategy': element.get('strategy') or element.get('locator_strategy'),
+            'locator_value': element.get('value') or element.get('locator_value'),
+            'name': element.get('name') or element.get('chinese_name') or element.get('text'),
             'center_x': element.get('center_x'),
             'center_y': element.get('center_y'),
         }
@@ -4889,9 +5071,8 @@ def stop_recording(request):
     """停止录制（放弃生成用例）"""
     key = _recording_session_key(request)
     sess = _close_recording_session(key)
-    if not sess:
-        return Response({'success': False, 'message': '没有进行中的录制会话'}, status=400)
-    return Response({'success': True, 'message': '录制已停止，未生成用例'})
+    # 会话已关闭也视为成功（可能已被 generate 自动关闭）
+    return Response({'success': True, 'message': '录制已停止'})
 
 
 def _build_test_case_from_steps(user, project, case_name, steps, app_package=""):
