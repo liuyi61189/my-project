@@ -274,6 +274,10 @@
             <div v-if="risk.related_testpoints && risk.related_testpoints.length" class="main-page-card-extra">
               <b>关联测试点：</b>{{ risk.related_testpoints.join(', ') }}
             </div>
+            <div v-if="riskAnswer(risk)" class="pci-sub-a-wrap risk-mitigation-wrap">
+              <label class="pci-sub-a-label">已确认处置：</label>
+              <div class="pci-sub-a-text">{{ riskAnswer(risk) }}</div>
+            </div>
           </div>
         </div>
         <pre v-else class="json-box">{{ pretty(proto.risks_json) }}</pre>
@@ -1260,6 +1264,10 @@ export default {
     priTag(p) {
       const m = { P0: 'danger', P1: 'warning', P2: '', critical: 'danger', high: 'warning', medium: 'info', low: 'info' }
       return m[p] || ''
+    },
+    riskAnswer(risk) {
+      if (!risk || typeof risk !== 'object') return ''
+      return risk.mitigation || risk.answer || risk.resolution_condition || risk.resolution || ''
     },
     // 冒烟用例字段归一化：技能 p4 输出用 test_steps/pass_criteria/is_core，
     // 前端/测试用例统一用 steps/expected/is_smoke
