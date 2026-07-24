@@ -982,7 +982,7 @@ export default {
           const parts = desc ? desc.split(/\s*(?:且|以及|；|,)\s*/).map(s => s.trim()).filter(Boolean) : ['(无描述内容)']
           const items = (parts.length ? parts : [desc || '(无描述内容)']).map(q => ({
             question: q,
-            answer: pci.answer || pci.resolution_condition || '',
+            answer: pci.answer || pci.resolution_condition || pci.resolution || '',
             confirmed: false,
             _loading: false,
           }))
@@ -1698,7 +1698,7 @@ export default {
         const parts = desc ? desc.split(/\s*(?:且|以及|；|,)\s*/).map(s => s.trim()).filter(Boolean) : ['(无描述内容)']
         const items = (parts.length ? parts : [desc || '(无描述内容)']).map(q => ({
           question: q,
-          answer: pci.answer || pci.resolution_condition || '',
+          answer: pci.answer || pci.resolution_condition || pci.resolution || '',
           confirmed: false,
           _loading: false,
         }))
@@ -1742,19 +1742,22 @@ export default {
       const pcis = this.mainPageParsedPci || []
       pcis.forEach((pci, i) => {
         const subs = pci.sub_questions
+        const fallbackAnswer = pci.answer || pci.resolution_condition || pci.resolution || ''
         if (Array.isArray(subs) && subs.length) {
           subs.forEach((s, j) => {
             out.push({
               pci, pciIndex: i,
               question: s.question || '',
               subIndex: j,
-              answer: s.answer || '',
+              // 兼容旧数据：历史版本可能只保存 PCI 顶层结论，
+              // 同时留下 answer 为空的 sub_questions，外层展示需回退顶层答案。
+              answer: s.answer || fallbackAnswer,
             })
           })
         } else {
           const desc = (pci.description || '').trim()
           const parts = desc ? desc.split(/\s*(?:且|以及|；|,)\s*/).map(s=>s.trim()).filter(Boolean) : ['(无描述内容)']
-          const answer = pci.answer || pci.resolution_condition || ''
+          const answer = fallbackAnswer
           ;(parts.length ? parts : [desc || '(无描述内容)']).forEach((q, j) => {
             out.push({ pci, pciIndex: i, question: q, subIndex: j, answer })
           })
