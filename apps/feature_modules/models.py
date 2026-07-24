@@ -14,6 +14,8 @@ class FeatureModule(models.Model):
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, verbose_name='创建者')
     created_at = models.DateTimeField(default=timezone.now, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+    parent = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True,
+                               related_name='children', verbose_name='父模块')
 
     def __str__(self):
         return f"{self.project.name} / {self.name}"

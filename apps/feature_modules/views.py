@@ -29,6 +29,7 @@ class FeatureModuleListCreateView(ProjectScopedMixin, generics.ListCreateAPIView
         return qs.distinct()
 
     def perform_create(self, serializer):
+        from rest_framework.exceptions import ValidationError
         user = self.request.user
         project_id = self.request.data.get('project_id')
         name = self.request.data.get('name', '').strip()
@@ -38,15 +39,16 @@ class FeatureModuleListCreateView(ProjectScopedMixin, generics.ListCreateAPIView
             try:
                 project = self.get_accessible_projects().get(id=project_id)
             except Project.DoesNotExist:
-                pass
+                raise ValidationError({'project_id': '没有权限访问该项目或项目不存在'})
+
+        if not project:
+            raise ValidationError({'project_id': '请选择所属项目'})
 
         # 防重：同一项目下同名功能模块直接返回已有的（幂等）
-        if name and project:
+        if name:
             existing = FeatureModule.objects.filter(project=project, name=name).first()
             if existing:
-                # 将 serializer instance 设为已有记录，返回 200 而非创建新记录
                 serializer.instance = existing
-                # 同时关联版本
                 if version_ids:
                     existing.versions.add(*version_ids)
                 return
@@ -79,10 +81,11 @@ def get_project_feature_modules(request, project_id):
         return Response({'error': '没有权限访问该项目'}, status=status.HTTP_403_FORBIDDEN)
 
     modules = FeatureModule.objects.filter(project_id=project_id)
-    # 按版本过滤
+    # 按版本过滤：返回已关联该版本 + 未关联任何版本的模块（避免游离模块丢失）
     version_id = request.query_params.get('version_id')
     if version_id:
-        modules = modules.filter(versions__id=version_id)
+        from django.db.models import Q
+        modules = modules.filter(Q(versions__id=version_id) | Q(versions__isnull=True) | Q(versions=None)).distinct()
     modules = modules.order_by('name')
     from .serializers import FeatureModuleSerializer
     serializer = FeatureModuleSerializer(modules, many=True)

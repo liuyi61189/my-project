@@ -594,6 +594,7 @@ class TestCase(models.Model):
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_test_cases', verbose_name='创建人')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+    tags = models.JSONField(null=True, blank=True, verbose_name='标签')
 
     class Meta:
         db_table = 'ui_test_cases'
@@ -1043,6 +1044,7 @@ class AppDevice(models.Model):
     device_type = models.CharField(max_length=20, choices=DEVICE_TYPE_CHOICES, default='real', verbose_name='设备类型')
     udid = models.CharField(max_length=200, unique=True, verbose_name='设备唯一标识')
     appium_server_url = models.CharField(max_length=500, default='http://localhost:4723', verbose_name='Appium Server地址')
+    adb_host = models.CharField(max_length=50, null=True, blank=True, default='', verbose_name='ADB主机', help_text='手机USB所在电脑的 IP:PORT（如 192.168.8.71:5037），后端通过该电脑的ADB服务控制此设备')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='offline', verbose_name='设备状态')
     resolution = models.CharField(max_length=50, blank=True, verbose_name='屏幕分辨率')
     capabilities = models.JSONField(default=dict, blank=True, verbose_name='额外配置', help_text='额外的Appium Capabilities')

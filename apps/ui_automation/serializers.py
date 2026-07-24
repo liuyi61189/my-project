@@ -960,6 +960,7 @@ class AppDeviceSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'platform', 'platform_display', 'platform_version',
             'device_type', 'device_type_display', 'udid', 'appium_server_url',
+            'adb_host',
             'status', 'status_display', 'resolution', 'capabilities',
             'last_heartbeat', 'notes', 'created_at', 'updated_at'
         ]

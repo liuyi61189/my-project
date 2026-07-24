@@ -15,9 +15,14 @@ class FeatureModuleSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = FeatureModule
-        fields = ['id', 'name', 'description', 'project', 'project_id', 'created_by',
+        fields = ['id', 'name', 'description', 'project', 'project_id', 'parent', 'created_by',
                   'created_at', 'testcases_count', 'version_ids', 'versions']
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        # version_ids 是 M2M 字段，不能传给 objects.create()，需提前取出
+        validated_data.pop('version_ids', None)
+        return super().create(validated_data)
 
     def get_testcases_count(self, obj):
         return obj.testcases.count()
