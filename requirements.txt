@@ -81,3 +81,14 @@ numpy>=1.26.0
 
 # JWT 安全机制
 djangorestframework-simplejwt==5.5.1
+
+# 移植应用依赖 (defects/data_factory/analytics/app_automation)
+channels==4.3.2
+daphne==4.2.2
+channels-redis==4.3.0
+fakerx==2.0.1
+Faker==40.31.0
+qrcode==8.2
+openpyxl==3.1.5
+loguru==0.7.3
+pyzbar==0.1.9

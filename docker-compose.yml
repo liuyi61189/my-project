@@ -32,6 +32,7 @@ services:
       - testhub-media:/app/media
       - testhub-logs:/app/logs
       - ./knowledge-base:/app/knowledge-bases
+      - testhub-chroma-data:/app/chroma
     depends_on:
       mysql:
         condition: service_healthy
@@ -63,3 +64,4 @@ volumes:
   testhub-mysql-data:
   testhub-media:
   testhub-logs:
+  testhub-chroma-data:

@@ -111,6 +111,101 @@ CREATE TABLE IF NOT EXISTS clarification_questions (
 ''')
 print('ensured table clarification_questions')
 
+# 确保墨刀技能 - 原型表（新功能：墨刀需求读取与用例生成）
+cur.execute('''
+CREATE TABLE IF NOT EXISTS modao_prototype (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    uuid VARCHAR(32) NOT NULL,
+    title VARCHAR(200) NOT NULL DEFAULT '墨刀需求梳理',
+    url LONGTEXT,
+    source_type VARCHAR(10) NOT NULL DEFAULT 'modao',
+    auth_cookie LONGTEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    current_stage INT NOT NULL DEFAULT 0,
+    extracted_json LONGTEXT,
+    requirement_summary LONGTEXT,
+    clarification_log LONGTEXT,
+    module_split LONGTEXT,
+    risks_json LONGTEXT,
+    pci_json LONGTEXT,
+    final_testpoints_json LONGTEXT,
+    testcases_json LONGTEXT,
+    smoke_json LONGTEXT,
+    quality_report_json LONGTEXT,
+    excel_path VARCHAR(500),
+    stage_confirmations LONGTEXT,
+    stage4_decision VARCHAR(20),
+    error_message LONGTEXT,
+    project_id INT NULL,
+    created_by_id INT NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE KEY uniq_uuid (uuid),
+    KEY idx_prototype_created (created_by_id)
+)
+''')
+print('ensured table modao_prototype')
+
+# 确保墨刀技能 - 页面表
+cur.execute('''
+CREATE TABLE IF NOT EXISTS modao_page (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    prototype_id INT NOT NULL,
+    page_no INT NOT NULL,
+    page_name VARCHAR(200),
+    text LONGTEXT,
+    annotations LONGTEXT,
+    screenshot VARCHAR(500),
+    KEY idx_page_prototype (prototype_id)
+)
+''')
+print('ensured table modao_page')
+
+# 确保墨刀原型表有 work_log 列（工作日志：各阶段进度记录）
+cur.execute(
+    "SELECT 1 FROM information_schema.columns "
+    "WHERE table_schema = DATABASE() AND table_name = 'modao_prototype' AND column_name = 'work_log'",
+)
+if not cur.fetchone():
+    cur.execute('ALTER TABLE modao_prototype ADD COLUMN work_log LONGTEXT')
+    print('ensured column work_log on modao_prototype')
+else:
+    print('work_log already exists')
+
+# 确保墨刀原型表有 qa_log 列（人工答疑记录）
+cur.execute(
+    "SELECT 1 FROM information_schema.columns "
+    "WHERE table_schema = DATABASE() AND table_name = 'modao_prototype' AND column_name = 'qa_log'",
+)
+if not cur.fetchone():
+    cur.execute('ALTER TABLE modao_prototype ADD COLUMN qa_log LONGTEXT')
+    print('ensured column qa_log on modao_prototype')
+else:
+    print('qa_log already exists')
+
+# 确保 modao_prototype 有 feature_module_id / version_id 列（阶段确认时同步功能模块）
+for col in ('feature_module_id', 'version_id'):
+    cur.execute(
+        f"SELECT 1 FROM information_schema.columns "
+        f"WHERE table_schema = DATABASE() AND table_name = 'modao_prototype' AND column_name = '{col}'",
+    )
+    if not cur.fetchone():
+        cur.execute(f'ALTER TABLE modao_prototype ADD COLUMN {col} INT')
+        print(f'ensured column {col} on modao_prototype')
+    else:
+        print(f'{col} already exists')
+
+# 确保 feature_modules 有 parent_id 列（功能模块层级：阶段3 子模块挂在阶段1 顶层模块下）
+cur.execute(
+    "SELECT 1 FROM information_schema.columns "
+    "WHERE table_schema = DATABASE() AND table_name = 'feature_modules' AND column_name = 'parent_id'",
+)
+if not cur.fetchone():
+    cur.execute('ALTER TABLE feature_modules ADD COLUMN parent_id INT NULL')
+    print('ensured column parent_id on feature_modules')
+else:
+    print('parent_id already exists')
+
 # 确保需求拆解结果表有 req_doc_id 列（关联需求文档，用于拆解结果持久化关联，刷新后重建）
 cur.execute(
     "SELECT 1 FROM information_schema.columns "
@@ -142,6 +237,17 @@ else:
     # 记录与库的真实状态一致，迁移检查通过、runserver 干净启动。
     print("Running migrations (fake all, no SQL executed)...")
     subprocess.run([sys.executable, "manage.py", "migrate", "--fake", "--no-input"], check=False)
+
+    # 为移植进来的新应用(defects/data_factory/analytics/app_automation)建表。
+    # 这些应用没有历史迁移占位，上面的 --fake 不会真正建表；用 schema_editor
+    # 直接按模型建表（幂等：已存在的表跳过），保证容器重启/全新部署后表存在。
+    print("Ensuring tables for ported apps (defects/data_factory/analytics/app_automation)...")
+    subprocess.run(
+        [sys.executable, "scripts/create_new_app_tables.py"],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        env={**os.environ, "PYTHONPATH": os.path.dirname(os.path.abspath(__file__))},
+        check=False,
+    )
 
     print("Initializing locator strategies...")
     try:

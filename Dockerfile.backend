@@ -32,6 +32,9 @@ RUN (wget -q https://dl.google.com/android/repository/platform-tools-latest-linu
 COPY requirements.txt .
 RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 
+# 安装 Playwright Chromium（墨刀读取 / UI自动化 需要浏览器引擎）
+RUN playwright install chromium && playwright install-deps chromium || echo "playwright browser install partial"
+
 # 复制项目代码
 COPY . .
 
