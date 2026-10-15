@@ -113,7 +113,8 @@ def _repair_yaml_text(text: str) -> str:
     import re as _re
     out = []
     for line in (text or '').split('\n'):
-        m = _re.match(r'^(\s*-\s*)(["\'])(.*?)\2(.*)$', line)
+        # 兼容列表项形如 `- "xxx" yyy` 或 键值形如 `key: "xxx" yyy`
+        m = _re.match(r'^(\s*(?:-\s*|[\w_]+:\s*))(["\'])(.*?)\2(.*)$', line)
         if m and m.group(4).strip():
             # 引号后还有裸文本：把引号内 + 引号外拼接后整体 JSON 转义（JSON 字符串是合法 YAML 标量）
             out.append(m.group(1) + _json.dumps(m.group(3) + m.group(4), ensure_ascii=False))
@@ -1006,7 +1007,7 @@ class ModaoWorkflow:
                 annotations=json.dumps(p.get('annotations', []), ensure_ascii=False),
                 screenshot=p.get('screenshot', ''),
                 screenshot_segments=json.dumps(p.get('screenshot_segments', []), ensure_ascii=False),
-                selected=(not should_filter),
+                selected=False,  # 首次提取默认不全选，由用户在看板显式执行「全部勾选」或按需挑选
                 recognition_note=note,
                 # A2-b：提取完成即标记画布「已读取」
                 current_stage=0,
@@ -1402,11 +1403,14 @@ class ModaoWorkflow:
                     continue
                 if selected_names and p.get('page_name') not in selected_names:
                     continue
+                anno_str = json.dumps(p.get('annotations', []), ensure_ascii=False) if p.get('annotations') else '[]'
+                va_str = json.dumps(p.get('visual_artifacts', []), ensure_ascii=False) if p.get('visual_artifacts') else '[]'
                 parts.append(
-                    f"### {p['page_name']}\n{p.get('text','')}\n"
-                    f"[注释/标注] {json.dumps(p.get('annotations', []), ensure_ascii=False)}\n"
-                    f"[结构化视觉内容 visual_artifacts] "
-                    f"{json.dumps(p.get('visual_artifacts', []), ensure_ascii=False)}")
+                    f"### 画布：{p['page_name']}\n"
+                    f"【核心需求标注/便利贴批注（本次需求增量核心，权重大）】：\n{anno_str}\n\n"
+                    f"【结构化视觉内容 visual_artifacts（注意：ui_screen 仅代表底模线框图外观截图，非业务规则；rule_list/state_matrix/annotation 为规则批注）】：\n{va_str}\n\n"
+                    f"【画布全景 OCR / 背景底模文字（仅供了解界面视觉上下文，未批注提及的底图固有文字非本次需求）】：\n{p.get('text','')}"
+                )
             return '\n\n'.join(parts)
         return self.prototype.requirement_summary or ''
 
@@ -1940,11 +1944,14 @@ class ModaoWorkflow:
                     continue
                 if p.get('page_name') not in page_names:
                     continue
+                anno_str = json.dumps(p.get('annotations', []), ensure_ascii=False) if p.get('annotations') else '[]'
+                va_str = json.dumps(p.get('visual_artifacts', []), ensure_ascii=False) if p.get('visual_artifacts') else '[]'
                 parts.append(
-                    f"### {p['page_name']}\n{p.get('text','')}\n"
-                    f"[注释/标注] {json.dumps(p.get('annotations', []), ensure_ascii=False)}\n"
-                    f"[结构化视觉内容 visual_artifacts] "
-                    f"{json.dumps(p.get('visual_artifacts', []), ensure_ascii=False)}")
+                    f"### 画布：{p['page_name']}\n"
+                    f"【核心需求标注/便利贴批注（本次需求增量核心，权重大）】：\n{anno_str}\n\n"
+                    f"【结构化视觉内容 visual_artifacts（注意：ui_screen 仅代表底模线框图外观截图，非业务规则；rule_list/state_matrix/annotation 为规则批注）】：\n{va_str}\n\n"
+                    f"【画布全景 OCR / 背景底模文字（仅供了解界面视觉上下文，未批注提及的底图固有文字非本次需求）】：\n{p.get('text','')}"
+                )
             return '\n\n'.join(parts)
         return ''
 
@@ -1990,9 +1997,15 @@ class ModaoWorkflow:
             self.prototype.status = 'extracted'
             self.prototype.save(update_fields=['status'])
             return ''
-        # 阶段1摘要决定已确认范围；原始内容只用于证据核对和查漏，
-        # 避免摘要遗漏被继续放大，也避免把用户已排除的需求重新带回流程。
-        structured = (self.prototype.requirement_summary or '').strip()
+        sel_names = self._selected_page_names()
+        # 画布级隔离：若限定了画布子集（如单画布流水线触发澄清），结构化范围收敛为该画布集合的摘要，
+        # 避免把其他画布（如定制mini形象）的摘要作为已确认范围送入当前画布审查。
+        if sel_names:
+            pages_to_clarify = list(self.prototype.pages.filter(page_name__in=sel_names))
+            summaries = [p.page_summary.strip() for p in pages_to_clarify if (p.page_summary or '').strip()]
+            structured = '\n\n'.join(summaries) if summaries else ''
+        else:
+            structured = (self.prototype.requirement_summary or '').strip()
         source_text = self._source_text().strip()
         confirmed_scope = structured or source_text
         scope_note = (
@@ -2103,18 +2116,39 @@ class ModaoWorkflow:
             if invalid_count:
                 self._log(f'澄清证据校验：{invalid_count} 项未匹配原始页面')
         self.prototype.clarification_log = out
-        # A2-c：联合澄清清单同时写入本次选中每个画布的 page_clarification（各画布各自保留）
+        # A2-c：澄清清单写回画布时按画布归属隔离（各画布只保留归属于自己的澄清项，防止跨画布串台）
         sel_names = self._selected_page_names()
         pages = list(self.prototype.pages.filter(page_name__in=sel_names)) if sel_names else list(self.prototype.pages.all())
+        all_pages_list = list(self.prototype.pages.all())
         for p in pages:
-            p.page_clarification = out or ''
-            p.mark_stage(2, status='done', log='澄清完成')
+            if isinstance(clarify_items, list):
+                matched = []
+                for item in clarify_items:
+                    if not isinstance(item, dict):
+                        continue
+                    loc = str(item.get('location') or '')
+                    # 匹配画布名或“第N页”
+                    is_match = (p.page_name in loc) or (p.page_no and f'第{p.page_no}页' in loc)
+                    # 单画布独立运行模式兜底：如果该条目并未明确指向其他已知画布，也归属当前画布
+                    if not is_match and len(pages) == 1:
+                        other_names = [other.page_name for other in all_pages_list if other.id != p.id and other.page_name]
+                        if not any(on in loc for on in other_names):
+                            is_match = True
+                    if is_match:
+                        matched.append(item)
+                p_out = json.dumps(matched, ensure_ascii=False, indent=2) if matched else '[]'
+                log_cnt = len(matched)
+            else:
+                p_out = out or ''
+                log_cnt = 0
+            p.page_clarification = p_out
+            p.mark_stage(2, status='done', log=f'澄清完成（{log_cnt} 项）')
             p.save(update_fields=['page_clarification', 'current_stage', 'stage_status', 'work_log'])
         self.prototype.status = 'extracted'
         self.prototype.current_stage = 2
         self.prototype.save()
         self._advance_selected_pages(2)
-        self._log('需求澄清完成（联合清单已写入各选中画布）')
+        self._log('需求澄清完成（已按画布隔离归属写回各画布）')
         return out
 
     # ---------- 阶段3：用例设计（核心）----------
