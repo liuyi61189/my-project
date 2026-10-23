@@ -1849,6 +1849,78 @@ class ModaoExtractor:
                         })
         return jobs
 
+    async def _execute_visual_jobs_pool(self, jobs: List[Dict[str, Any]], vision_config,
+                                       prototype_id: Optional[int] = None,
+                                       concurrency: int = 6) -> Dict[int, Dict[str, Any]]:
+        """使用 asyncio.Semaphore 并发调度视觉分析任务。
+        并发调用阿里 DashScope 多模态大模型，复用已有 sha256 缓存。
+        """
+        if not jobs or not vision_config:
+            return {}
+
+        sem = asyncio.Semaphore(concurrency)
+        results_by_page: Dict[int, Dict[str, Any]] = {}
+
+        async def _run_one(job):
+            _raise_if_terminated(prototype_id)
+            pidx = job['page_idx']
+            jtype = job['job_type']
+            spath = job['shot_path']
+            st_name = job.get('state')
+
+            if jtype == 'inherit':
+                return pidx, {'job_type': 'inherit', 'state': st_name, 'result': None}
+
+            async with sem:
+                _raise_if_terminated(prototype_id)
+                try:
+                    res = await self._ocr_screenshot(vision_config, spath)
+                except Exception as e:
+                    logger.warning(f"视觉分析失败 ({spath}): {e}")
+                    res = {'ocr_text': '', 'visual_summary': '', 'visual_artifacts': []}
+                return pidx, {'job_type': jtype, 'state': st_name, 'result': res}
+
+        tasks = [_run_one(j) for j in jobs]
+        completed = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for item in completed:
+            if isinstance(item, Exception):
+                logger.warning(f"视觉并发分析单项发生异常: {item}")
+                continue
+            pidx, data = item
+            if pidx not in results_by_page:
+                results_by_page[pidx] = {
+                    'ocr_text': '',
+                    'visual_summary': '',
+                    'visual_artifacts': [],
+                    'states_data': []
+                }
+
+            jtype = data['job_type']
+            res = data.get('result') or {}
+            st_name = data.get('state')
+
+            if jtype == 'full':
+                results_by_page[pidx]['ocr_text'] = res.get('ocr_text', '')
+                results_by_page[pidx]['visual_summary'] = res.get('visual_summary', '')
+                results_by_page[pidx]['visual_artifacts'] = res.get('visual_artifacts', [])
+            elif jtype == 'incremental' and res:
+                results_by_page[pidx]['states_data'].append({
+                    'state': st_name,
+                    'summary': res.get('visual_summary', ''),
+                    'new_text': res.get('ocr_text', ''),
+                    'artifacts': res.get('visual_artifacts', [])
+                })
+            elif jtype == 'inherit':
+                results_by_page[pidx]['states_data'].append({
+                    'state': st_name,
+                    'summary': '(无结构变更)',
+                    'new_text': '',
+                    'artifacts': []
+                })
+
+        return results_by_page
+
 
     def _extract_singlefile_h5(self, url: str, cookie_dict: Optional[Dict[str, str]] = None,
                                vision_config=None, dual_fusion: bool = False,
