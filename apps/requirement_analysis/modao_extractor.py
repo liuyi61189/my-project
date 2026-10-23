@@ -22,7 +22,7 @@ import hashlib
 import logging
 import asyncio
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import urljoin, quote
 
 logger = logging.getLogger(__name__)
@@ -1702,6 +1702,96 @@ class ModaoExtractor:
         except Exception as e:
             logger.warning(f'单文件H5 手机界面文本读取失败: {e}')
         return out
+
+    async def _capture_singlefile_h5_session(self, url: str, pages_meta: List[Dict[str, Any]],
+                                            cookie_dict: Optional[Dict[str, str]] = None,
+                                            prototype_id: Optional[int] = None) -> Tuple[Dict[str, str], Dict[int, Dict[str, Any]]]:
+        """单次 Playwright 会话快速连拍所有主页面与子状态全景截图，同时读取屏幕 innerText。
+        避免对每个状态反复 launch 浏览器。保持全景视口截图，绝不裁切需求信息。
+        """
+        from playwright.async_api import async_playwright
+        screen_texts: Dict[str, str] = {}
+        shot_manifest: Dict[int, Dict[str, Any]] = {}
+
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+                context = await browser.new_context(
+                    viewport={'width': 1440, 'height': 900},
+                    user_agent=('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                                '(KHTML, like Gecko) Chrome/124.0 Safari/537.36'))
+                if cookie_dict:
+                    cookies = [{'name': k, 'value': v, 'url': url} for k, v in cookie_dict.items()]
+                    await context.add_cookies(cookies)
+
+                page = await context.new_page()
+                await page.goto(url, wait_until='networkidle', timeout=60000)
+
+                for idx, meta in enumerate(pages_meta, 1):
+                    _raise_if_terminated(prototype_id)
+                    pid = meta.get('id') or f'page{idx}'
+                    states = meta.get('states') or []
+                    page_entry = {'default_shot': None, 'state_shots': []}
+
+                    # 1. 切换并拍摄默认态全景
+                    try:
+                        await page.evaluate(f"render('{pid}')")
+                        await page.wait_for_timeout(250)
+                    except Exception as e:
+                        logger.warning(f"页面[{pid}] render 失败: {e}")
+
+                    # 读取屏幕文本
+                    try:
+                        stxt = await page.evaluate("""() => {
+                            const el = document.querySelector('.phone') || document.querySelector('.screen') || document.body;
+                            return el ? (el.innerText || el.textContent || '') : '';
+                        }""")
+                        screen_texts[pid] = (stxt or '').strip()
+                    except Exception:
+                        screen_texts[pid] = ''
+
+                    default_shot = os.path.join(self.shot_dir, f'ws_page_{idx}.png')
+                    try:
+                        await page.screenshot(path=default_shot, full_page=False)
+                        page_entry['default_shot'] = default_shot
+                    except Exception as e:
+                        logger.warning(f"默认态截图失败 ws_page_{idx}.png: {e}")
+
+                    # 2. 遍历状态快速切态连拍
+                    for si, st in enumerate(states, 1):
+                        _raise_if_terminated(prototype_id)
+                        st = str(st).strip()
+                        if not st:
+                            continue
+                        switched = False
+                        for js in (
+                            f"render('{pid}');setState('{pid}', '{st}')",
+                            f"render('{pid}');setState('{st}')",
+                            f"setState('{st}')",
+                        ):
+                            try:
+                                await page.evaluate(js)
+                                switched = True
+                                break
+                            except Exception:
+                                continue
+                        if switched:
+                            await page.wait_for_timeout(200)
+                            st_shot = os.path.join(self.shot_dir, f'ws_page_{idx}_st{si}.png')
+                            try:
+                                await page.screenshot(path=st_shot, full_page=False)
+                                page_entry['state_shots'].append({'state': st, 'shot_path': st_shot})
+                            except Exception as e:
+                                logger.warning(f"状态态截图失败 {st_shot}: {e}")
+
+                    shot_manifest[idx] = page_entry
+
+                await browser.close()
+        except Exception as e:
+            logger.error(f"单文件H5 极速连拍会话异常: {e}")
+
+        return screen_texts, shot_manifest
 
 
     def _extract_singlefile_h5(self, url: str, cookie_dict: Optional[Dict[str, str]] = None,
