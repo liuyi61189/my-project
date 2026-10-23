@@ -1793,6 +1793,62 @@ class ModaoExtractor:
 
         return screen_texts, shot_manifest
 
+    @staticmethod
+    def _is_image_file_different(path_a: str, path_b: str) -> bool:
+        """轻量级图片差异比对：
+        1. 路径或文件不存在时视为差异（兜底保护）；
+        2. sha256 相同判定为完全无差异；
+        3. 文件大小差异微弱且内容哈希匹配时判定无差异。
+        """
+        if not path_a or not path_b or not os.path.exists(path_a) or not os.path.exists(path_b):
+            return True
+        try:
+            import hashlib
+            with open(path_a, 'rb') as fa, open(path_b, 'rb') as fb:
+                ha = hashlib.sha256(fa.read()).hexdigest()
+                hb = hashlib.sha256(fb.read()).hexdigest()
+                if ha == hb:
+                    return False
+        except Exception:
+            pass
+        return True
+
+    def _plan_visual_jobs(self, shot_manifest: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """为所有页面与状态编排视觉识别任务：
+        主页面默认图 100% 触发 full 视觉识别；
+        子状态图比对默认图，存在差异才派发 incremental 任务，否则直接标记 inherit。
+        """
+        jobs = []
+        for idx, entry in shot_manifest.items():
+            def_shot = entry.get('default_shot')
+            if def_shot:
+                jobs.append({
+                    'page_idx': idx,
+                    'job_type': 'full',
+                    'shot_path': def_shot,
+                    'state': None,
+                })
+
+            for st_info in entry.get('state_shots', []):
+                st_shot = st_info.get('shot_path')
+                st_name = st_info.get('state')
+                if st_shot:
+                    if self._is_image_file_different(def_shot, st_shot):
+                        jobs.append({
+                            'page_idx': idx,
+                            'job_type': 'incremental',
+                            'shot_path': st_shot,
+                            'state': st_name,
+                        })
+                    else:
+                        jobs.append({
+                            'page_idx': idx,
+                            'job_type': 'inherit',
+                            'shot_path': st_shot,
+                            'state': st_name,
+                        })
+        return jobs
+
 
     def _extract_singlefile_h5(self, url: str, cookie_dict: Optional[Dict[str, str]] = None,
                                vision_config=None, dual_fusion: bool = False,
