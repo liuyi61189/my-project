@@ -14,7 +14,13 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 # 安装系统依赖（MySQL客户端编译必需 + Airtest/OpenCV 运行库）
-RUN apt-get update \
+#
+# 2026-11-09: 必须先换 Debian 源再 apt-get update。
+#   本网络实测 deb.debian.org 只有 27 KB/s（拉 9.6MB 的 Packages 索引会卡到超时），
+#   mirrors.aliyun.com 实测 732 KB/s（27 倍）。下方 playwright 段早已这么做，
+#   这里原来漏了，导致 2026-11-09 Docker 数据盘重建后的首次 base 构建卡在 apt。
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         default-libmysqlclient-dev \
         build-essential \
