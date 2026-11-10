@@ -845,6 +845,14 @@ def modao_create(request):
         logging.getLogger('modao').info(f'[modao_create] URL contains /webshare/, overriding source_type {source_type} -> webshare')
         source_type = 'webshare'
 
+    # 空地址必须在这里拦下：历史上有任务因地址为空被创建成功（201），
+    # 随后阶段0 立刻 failed「未提供有效的需求地址」，用户只能删掉重建。
+    # 文本来源的正文在 requirement_text，不受此限。
+    if source_type != 'text' and not url_str.strip():
+        return Response(
+            {'detail': '请提供需求地址（webshare 页面树链接 / 具体 HTML 文件地址 / 墨刀原型链接）'},
+            status=http_status.HTTP_400_BAD_REQUEST)
+
     proto = ModaoPrototype(
         uuid=uuid_lib.uuid4().hex,
         title=data.get('title', '墨刀需求梳理'),

@@ -167,6 +167,22 @@ _PRD_TITLE_RE = re.compile(
 )
 _PRD_BLOCK_SPLIT_MIN = 1  # 至少要有 1 个需求模块才认为是 PRD 报告页
 
+# ---------- 编辑器版 PRD 报告页（第 5 种来源，如「Lovin1.3.14-PRD.html」）----------
+# 与第 4 种（doc-page / requirement-module）的区别：上面所有类名在这里**一个都不存在**，
+# 也没有单文件 H5 的内联 `const pages`。结构是：
+#   <aside class="sidebar">   <div class="menu">   <div data-page="chat" ...>  ← 页面菜单（9 项）
+#   <aside class="preview">   <div class="tabs">   <div class="tab" data-state="min"> ← 状态标签
+#   <div id="doc">                                 ← 正文容器，但**只有当前激活页**的静态 HTML
+#   <script> const P=[...] </script>               ← 全部页面正文都在这里（合法 JSON）
+# P 元素结构（2026-11 实测 1.3.14：9 页 / 11.6KB）：
+#   {id, name, intro,
+#    states: [[state_id, state_name, img_name], ...],
+#    common: [str, ...],                                  ← 全页公共规则
+#    req:    [[state_id, req_title, [str, ...]], ...]}    ← 每个状态的需求条目
+# 该 HTML 122MB 里 99% 是内联 base64 截图（ASSETS 名字表 + 图片），剥离 data URI 后仅 70KB，
+# 因此纯 HTTP 秒级可解析：不需要 Playwright，也没有可做的视觉识别。
+_PRD_P_ARRAY_RE = re.compile(r'(?:const|let|var)\s+P\s*=\s*(\[)')
+
 
 def _extract_js_balanced(text: str, start: int, open_ch: str = '[', close_ch: str = ']') -> Optional[str]:
     """从 text[start] 起（指向 open_ch）用引号感知括号配对，返回完整 [...]/{...} 文本。"""
@@ -1405,6 +1421,10 @@ class ModaoExtractor:
         # 有内联页面树 → 属于单文件 H5 原型，不是 PRD 报告页
         if _SINGLEFILE_H5_PAGES_RE.search(html_text):
             return False
+        # 编辑器版 PRD 报告页（第 5 种）：内联 `const P=[...]` + 页面菜单 data-page。
+        # 单靠 `const P=` 变量名太短、易与普通页面脚本混淆，故要求两者同时成立。
+        if ModaoExtractor._is_prd_parray_html(html_text):
+            return True
         n_mod = html_text.count(_PRD_MODULE_CLS)
         n_item = html_text.count(_PRD_ITEM_CLS)
         if n_mod >= _PRD_BLOCK_SPLIT_MIN or n_item >= 2:
@@ -1602,6 +1622,106 @@ class ModaoExtractor:
                 proto_titles.append(m_a.group(1).strip())
         return modules, proto_titles
 
+    @staticmethod
+    def _is_prd_parray_html(html_text: str) -> bool:
+        """判断是否为「编辑器版 PRD 报告页」：页面菜单 data-page + 内联 `const P=[...]`。
+
+        两个特征缺一不可：真实页面菜单（`div[data-page]`，实测 9 个）负责把这类文档
+        和普通网页区分开；`const P=[` 才是正文载体。只用后者会误吞任何定义过
+        单字母变量的页面脚本。
+        """
+        if not html_text:
+            return False
+        if html_text.count('data-page') < 2:
+            return False
+        return bool(_PRD_P_ARRAY_RE.search(html_text))
+
+    @staticmethod
+    def _is_prd_parray_menu(html_text: str) -> bool:
+        """编辑器版 PRD 的**廉价**特征：页面菜单（`id="menu"` + ≥2 个 `data-page`）。
+
+        仅用于流式探测（`_is_prd_report_url`）：这类文档的内联 base64 截图可达 120MB，
+        `const P=[...]` 往往排在截图之后，8MB 探测窗口根本读不到；而菜单标记在文档前
+        20KB 内必定出现。是否真能解析，由 `extract_prd_report_sync` 拿全文再校验一次。
+        """
+        if not html_text:
+            return False
+        return 'id="menu"' in html_text and html_text.count('data-page') >= 2
+
+    @classmethod
+    def _parse_prd_parray(cls, html_text: str):
+        """解析编辑器版 PRD 报告页的内联 `const P=[...]`，返回模块列表。
+
+        为什么必须从 P 数组取：HTML 的 `#doc` 容器里**只有当前激活那一页**的静态正文，
+        其余 8 页靠 JS 切换渲染，静态解析只能拿到 1 页。
+
+        返回结构与 `_parse_prd_report` 保持一致（`[{'id','name','owner','summary','text'}]`），
+        以便复用 `_prd_page_specs`：一个页面 = 一个画布/需求模块。
+        """
+        m = _PRD_P_ARRAY_RE.search(html_text or '')
+        if not m:
+            return []
+        raw = _extract_js_balanced(html_text, m.start(1))
+        if not raw:
+            return []
+        data = None
+        # 实测是合法 JSON；去掉尾逗号再试一次，容忍手写导出时的轻微不合法。
+        for candidate in (raw, re.sub(r',\s*([}\]])', r'\1', raw)):
+            try:
+                data = json.loads(candidate)
+                break
+            except Exception:
+                data = None
+        if not isinstance(data, list):
+            logger.warning('[PRD报告页-编辑器版] const P 数组无法解析为 JSON，跳过')
+            return []
+
+        modules: List[Dict[str, Any]] = []
+        for i, p in enumerate(data):
+            if not isinstance(p, dict):
+                continue
+            name = str(p.get('name') or '').strip()
+            intro = str(p.get('intro') or '').strip()
+            # state_id → 状态名，用于给 req 条目补上可读的状态标签
+            state_names: Dict[str, str] = {}
+            for st in (p.get('states') or []):
+                if isinstance(st, (list, tuple)) and len(st) >= 2:
+                    state_names[str(st[0] or '')] = str(st[1] or '').strip()
+
+            lines: List[str] = []
+            if name:
+                lines.append(f'【页面】{name}')
+            if intro:
+                lines.append(f'【概述】{intro}')
+            common = [str(c).strip() for c in (p.get('common') or []) if str(c).strip()]
+            if common:
+                lines.append('【公共规则】')
+                lines.extend(f'- {c}' for c in common)
+            for req in (p.get('req') or []):
+                if not isinstance(req, (list, tuple)) or len(req) < 2:
+                    continue
+                sid = str(req[0] or '')
+                title = str(req[1] or '').strip()
+                items = req[2] if len(req) > 2 else []
+                if isinstance(items, str):
+                    items = [items]
+                items = [str(x).strip() for x in (items or []) if str(x).strip()]
+                label = state_names.get(sid) or sid
+                lines.append(('[状态:%s] %s' % (label, title)).strip() if title
+                             else '[状态:%s]' % label)
+                lines.extend(f'➢ {x}' for x in items)
+            text = '\n'.join(ln for ln in lines if ln.strip()).strip()
+            if not text:
+                continue
+            modules.append({
+                'id': str(p.get('id') or f'module-{i + 1}'),
+                'name': name or f'需求模块{i + 1}',
+                'owner': '',
+                'summary': intro,
+                'text': text,
+            })
+        return modules
+
     @classmethod
     def _prd_page_specs(cls, modules, proto_titles):
         """把 (需求模块, 页面标题) 组装成落库页规格。
@@ -1658,11 +1778,14 @@ class ModaoExtractor:
                 buf.append(chunk)
                 size += len(chunk)
                 joined = b''.join(buf).decode('utf-8', 'ignore')
-                if not ModaoExtractor._is_prd_report_html(joined):
-                    if size >= limit:
-                        return False
-                    continue
-                return True
+                # 编辑器版额外用「页面菜单」提前认定：其 `const P=[...]` 常在几十 MB
+                # 内联截图之后，8MB 窗口读不到，只靠 _is_prd_report_html 会漏判。
+                if (ModaoExtractor._is_prd_report_html(joined)
+                        or ModaoExtractor._is_prd_parray_menu(joined)):
+                    return True
+                if size >= limit:
+                    return False
+                continue
             joined = b''.join(buf).decode('utf-8', 'ignore')
             if length and size < length:
                 # 未读完且特征未命中：降级为一次全文判断（少数模块在文档尾部的情况）
@@ -1724,13 +1847,24 @@ class ModaoExtractor:
             return {'run_id': self.run_id, 'url': url, 'pages': pages,
                     'warnings': warnings + ['未识别为 PRD 报告页格式']}
 
-        modules, proto_titles = self._parse_prd_report(html_text)
-        if not modules and not proto_titles:
-            return {'run_id': self.run_id, 'url': url, 'pages': pages,
-                    'warnings': warnings + ['未解析出需求模块或原型页面清单']}
-
-        logger.info(f'[PRD报告页] 解析到 {len(modules)} 个需求模块、'
-                    f'{len(proto_titles)} 个原型页面标题')
+        # 两种承载方式分支：编辑器版正文在内联 `const P=[...]`，doc-page 版正文在 HTML 结构里。
+        # 静态 HTML 的 `#doc` 只有当前激活页，编辑器版必须走 P 数组，否则只能拿到 1 页。
+        _parray = self._is_prd_parray_html(html_text)
+        if _parray:
+            modules = self._parse_prd_parray(html_text)
+            proto_titles = []
+            if not modules:
+                return {'run_id': self.run_id, 'url': url, 'pages': pages,
+                        'warnings': warnings
+                        + ['编辑器版 PRD 报告页未解析出任何页面（内联 const P 为空或不可解析）']}
+            logger.info(f'[PRD报告页-编辑器版] 解析到 {len(modules)} 个需求页面')
+        else:
+            modules, proto_titles = self._parse_prd_report(html_text)
+            if not modules and not proto_titles:
+                return {'run_id': self.run_id, 'url': url, 'pages': pages,
+                        'warnings': warnings + ['未解析出需求模块或原型页面清单']}
+            logger.info(f'[PRD报告页] 解析到 {len(modules)} 个需求模块、'
+                        f'{len(proto_titles)} 个原型页面标题')
 
         specs = self._prd_page_specs(modules, proto_titles)
         for idx, sp in enumerate(specs, 1):
@@ -1761,7 +1895,8 @@ class ModaoExtractor:
                 'extraction_warnings': [],
             })
         warnings.append(
-            f'PRD 报告页解析完成：{len(modules)} 个需求模块'
+            f'PRD 报告页解析完成：{len(modules)} 个'
+            + ('需求页面' if _parray else '需求模块')
             + (f'、{len(proto_titles)} 个原型页面标题' if proto_titles else '')
             + '（内嵌截图未做识别，如需图片内容请另行提供）')
 

@@ -2642,6 +2642,14 @@ export default {
         } else if (this.form.source_type === 'webshare') {
           urls = (this.form.webshare_url || '').split('\n').map(s => s.trim()).filter(Boolean)
         }
+        // 空地址不提交：后端会 400，这里先给明确提示（此前会创建出必然失败的空任务）
+        if (this.form.source_type !== 'text' && !urls.length) {
+          this.busy = false
+          this.$message.warning(this.form.source_type === 'webshare'
+            ? '请填写 webshare 页面树链接（目录地址或具体 HTML 文件地址）'
+            : '请填写墨刀原型链接')
+          return
+        }
         const payload = { ...this.form, urls }
         const res = await request({ url: `${this.base()}/create/`, method: 'post', data: payload })
         this.protoId = res.data.id
@@ -3091,6 +3099,14 @@ export default {
             this.protoId = res.data.id
             this.proto = res.data
             this.step = res.data.current_stage || 0
+            // 回填地址：否则「重新读取当前任务」只能靠后端用 proto.url 兜底；
+            // 一旦该任务当初没存地址（例如历史空地址任务），页面上点多少次都是
+            // 同一句「未提供有效的需求地址」，用户无法自愈。
+            const srcType = res.data.source_type || this.form.source_type
+            this.form.source_type = srcType
+            this.form.url = srcType === 'modao' ? (res.data.url || '') : ''
+            this.form.webshare_url = srcType === 'webshare' ? (res.data.url || '') : ''
+            if (res.data.title) this.form.title = res.data.title
             // 从任务列表「继续」进入时，只要任务还处于可编辑的早期阶段，就重新展示画布校验面板，
             // 避免之前点过「保存校验/跳过」导致 canvasConfirmed=true 后回退无法再选画布。
             // partial（读取超时中断）同样要露出校验面板与「继续读取」按钮。
