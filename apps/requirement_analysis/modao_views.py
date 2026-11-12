@@ -434,6 +434,8 @@ def _adopted_entry_keys(proto):
         return keys
     project = proto.project
     pages = list(proto.pages.exclude(page_testcases_json='').exclude(page_testcases_json__isnull=True))
+    if not pages:
+        return keys
     pages.sort(key=lambda p: (p.page_no or 0))
 
     # ── 批量预取（只读，无写副作用）──
