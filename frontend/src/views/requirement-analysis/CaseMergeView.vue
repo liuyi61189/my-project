@@ -571,6 +571,7 @@ export default {
     },
     parseArr(s) {
       if (!s) return []
+      if (Array.isArray(s)) return s
       try {
         const v = JSON.parse(s)
         if (Array.isArray(v)) return v
@@ -582,6 +583,7 @@ export default {
     /** 冒烟 JSON 顶层是对象（{smoke_testcases: [...]}），需单独解析 */
     parseSmoke(s) {
       if (!s) return []
+      if (Array.isArray(s)) return s
       try {
         const v = JSON.parse(s)
         if (Array.isArray(v)) return v

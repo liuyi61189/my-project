@@ -380,7 +380,8 @@ class ModaoExtractor:
 
             page = await context.new_page()
             try:
-                await page.goto(url, wait_until='networkidle', timeout=60000)
+                await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+                await page.wait_for_timeout(1000)
             except Exception as e:
                 warnings.append(f'页面加载超时/异常（继续尝试提取）: {e}')
                 try:
@@ -767,6 +768,8 @@ class ModaoExtractor:
         if dual_fusion and fusion_config:
             try:
                 fused_requirements = await self.dual_fusion_requirements(pages, fusion_config, prototype_id)
+            except ModaoTerminateError:
+                raise
             except Exception as e:
                 logger.warning(f'双路融合失败（已跳过，保留分路径数据）: {e}')
                 warnings.append(f'双路融合失败（已跳过）: {e}')
@@ -1380,33 +1383,31 @@ class ModaoExtractor:
             return None
         norm = base_url.rstrip('/').lower() + '/'
         try:
-            qs = (ModaoPrototype.objects
-                  .exclude(extracted_json='')
-                  .order_by('-id')
-                  .values_list('extracted_json', flat=True)[:80])
+            qs = list(ModaoPrototype.objects
+                      .exclude(extracted_json='')
+                      .order_by('-id')
+                      .values_list('extracted_json', flat=True)[:80])
+            for ej in qs:
+                try:
+                    data = json.loads(ej or '{}')
+                except Exception:
+                    continue
+                # 候选来源：urls 列表 / pages 里记录过的文件级 URL / warnings 里的定位结果
+                cands = list(data.get('urls') or [])
+                for w in (data.get('warnings') or []):
+                    m = re.search(r'已从目录地址定位到单文件：(\S+)', str(w))
+                    if m:
+                        cands.append(m.group(1))
+                for c in cands:
+                    c = str(c or '').strip()
+                    if not c.lower().startswith(norm):
+                        continue
+                    if '.' not in c.rsplit('/', 1)[-1]:
+                        continue
+                    return c
         except Exception:
             return None
-        for ej in qs:
-            try:
-                data = json.loads(ej or '{}')
-            except Exception:
-                continue
-            # 候选来源：urls 列表 / pages 里记录过的文件级 URL / warnings 里的定位结果
-            cands = list(data.get('urls') or [])
-            for w in (data.get('warnings') or []):
-                m = re.search(r'已从目录地址定位到单文件：(\S+)', str(w))
-                if m:
-                    cands.append(m.group(1))
-            for c in cands:
-                c = str(c or '').strip()
-                if not c.lower().startswith(norm):
-                    continue
-                if '.' not in c.rsplit('/', 1)[-1]:
-                    continue  # 仍是目录，不要
-                logger.info(f'[目录解析] 从历史记录兜底命中直链：{c}')
-                return c
         return None
-
     # ---------- PRD 报告页（第 4 种来源，纯 HTTP）----------
     @staticmethod
     def _is_prd_report_html(html_text: str) -> bool:
@@ -1967,7 +1968,8 @@ class ModaoExtractor:
                     user_agent=('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                                 '(KHTML, like Gecko) Chrome/124.0 Safari/537.36'))
                 page = await context.new_page()
-                await page.goto(url, wait_until='networkidle', timeout=60000)
+                await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+                await page.wait_for_timeout(1000)
                 # 左侧目录懒渲染：先等 .nav-item 出现，再交给 _read_nav_directory 做稳定性采样
                 try:
                     await page.wait_for_selector('.nav-item', timeout=15000, state='attached')
@@ -2039,26 +2041,36 @@ class ModaoExtractor:
         return out;
     }'''
 
-    _NAV_DIRECTORY_JS = '''() => {
+    _NAV_DIRECTORY_JS = r'''() => {
         // 从左侧目录（.nav-group 分组标题 + .nav-item 可点击条目）读取权威页面清单。
-        // 单文件报告页的 .nav-item 形如：
-        //   <button class="nav-item" onclick="vDirectory('search')">搜索</button>
-        // onclick 里的参数就是页面真实 id（与 render()/retained 一致），
-        // 而显示文本是作者定义的模块名 —— 这就是需求的真实目录结构。
+        // 增加 isVisible 过滤，确保与肉眼可见页面 100% 一致（自动剔除 hidden/display:none/存档节点）
+        const isVisible = (el) => {
+            if (!el) return false;
+            if (el.hidden) return false;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+            if (el.offsetParent === null && style.position !== 'fixed') return false;
+            return true;
+        };
         const groups = [];
         const nodes = Array.from(document.querySelectorAll('.nav-group, .nav-item'));
         let cur = '';
         for (const el of nodes) {
+            if (!isVisible(el)) continue;
             if (el.classList && el.classList.contains('nav-group')) {
                 cur = (el.innerText || '').trim();
                 continue;
             }
             const oc = el.getAttribute('onclick') || '';
-            const m = oc.match(/v(?:Directory|Go)\\(['"]([^'"]+)['"]\\)/);
+            const m = oc.match(/(?:vDirectory|render|go|showPage|switchPage)\s*\(\s*['"]([^'"]+)['"]/);
+            let pid = m ? m[1] : '';
+            if (!pid && el.dataset) {
+                pid = el.dataset.id || el.dataset.page || '';
+            }
             groups.push({
                 group: cur,
                 title: (el.innerText || '').trim(),
-                id: m ? m[1] : '',
+                id: pid,
                 active: el.classList.contains('active'),
             });
         }
@@ -2209,7 +2221,8 @@ class ModaoExtractor:
 
     async def _capture_singlefile_h5_session(self, url: str, pages_meta: List[Dict[str, Any]],
                                             cookie_dict: Optional[Dict[str, str]] = None,
-                                            prototype_id: Optional[int] = None):
+                                            prototype_id: Optional[int] = None,
+                                            target_set: Optional[set] = None) -> Tuple[Dict[str, str], Dict[int, Dict[str, Any]], Optional[List[Dict[str, Any]]]]:
         """单次 Playwright 会话快速连拍所有主页面与子状态全景截图，同时读取屏幕 innerText。
         避免对每个状态反复 launch 浏览器。保持全景视口截图，绝不裁切需求信息。
 
@@ -2237,12 +2250,66 @@ class ModaoExtractor:
                     await context.add_cookies(cookies)
 
                 page = await context.new_page()
-                await page.goto(url, wait_until='networkidle', timeout=60000)
+                await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+                await page.wait_for_timeout(1000)
                 # 左侧目录懒渲染：先等 .nav-item 出现，再交给 _read_nav_directory 做稳定性采样
                 try:
                     await page.wait_for_selector('.nav-item', timeout=15000, state='attached')
                 except Exception:
                     logger.info('[单文件H5] 未等到 .nav-item 出现（可能非目录式原型）')
+
+                # 页面清单以左侧目录（nav-group + nav-item，且为真实可见节点）为准
+                nav_meta = None
+                try:
+                    nav_meta = await self._read_nav_directory(page)
+                except Exception as e:
+                    logger.warning('读取左侧目录失败: %s', e)
+                if not nav_meta:
+                    try:
+                        _c = await page.evaluate(
+                            "() => ({nav: document.querySelectorAll('.nav-item').length,"
+                            " grp: document.querySelectorAll('.nav-group').length})")
+                    except Exception:
+                        _c = {}
+                    logger.warning('[单文件H5] 左侧目录不可用（nav-item=%s, nav-group=%s），'
+                                   '退回运行时清单', _c.get('nav'), _c.get('grp'))
+                if nav_meta:
+                    pages_meta = nav_meta
+                    # 如果提供了 target_set，按目标画布收敛
+                    if target_set:
+                        named = []
+                        for _m in pages_meta:
+                            _t = _m.get('title') or ''
+                            _g = _m.get('group') or ''
+                            _pn = f'{_g}-{_t}' if _g else _t
+                            if _pn in target_set:
+                                named.append(_m)
+                        if not named:
+                            for _m in pages_meta:
+                                _t = (_m.get('title') or '').strip()
+                                if any(_t and _t in _tn for _tn in target_set) or any(_tn and _tn in _t for _tn in target_set):
+                                    named.append(_m)
+                        if named:
+                            pages_meta = named
+                    # 用运行时清单补充每个页面的 states（状态清单）
+                    try:
+                        runtime_meta = await self._read_runtime_pages(page)
+                    except Exception:
+                        runtime_meta = None
+                    if runtime_meta:
+                        _st_map = {str(m.get('id')): (m.get('states') or [])
+                                   for m in runtime_meta if m.get('id')}
+                        for m in pages_meta:
+                            mid = str(m.get('id') or '')
+                            if mid in _st_map and not m.get('states'):
+                                m['states'] = _st_map[mid]
+                else:
+                    try:
+                        runtime_meta = await self._read_runtime_pages(page)
+                        if runtime_meta:
+                            pages_meta = runtime_meta
+                    except Exception as e:
+                        logger.warning('读取运行时页面清单失败: %s', e)
 
                 # ⚠️ 2026-11-04：页面清单以**左侧目录（nav-group + nav-item）为准**。
                 #
@@ -2301,12 +2368,10 @@ class ModaoExtractor:
                     _raise_if_terminated(prototype_id)
                     pid = meta.get('id') or f'page{idx}'
                     states = meta.get('states') or []
-                    page_entry = {'default_shot': None, 'state_shots': []}
+                    page_entry = {'default_shot': None, 'state_shots': [], 'spec_text': ''}
 
                     # 1. 切换并拍摄默认态全景
-                    # 说明（2026-11-04 修正）：优先点击左侧目录条目（真实用户操作路径，
-                    # 实测 33/33 可点），render() 仅作兜底 —— 该页面对 qa-* 有答题守卫、
-                    # 对已废弃 id 有 retained 回落，直接 render 并不可靠。
+                    # 说明：优先点击左侧目录条目（真实用户操作路径），render() 与 vDirectory 仅作兜底
                     switched = False
                     try:
                         switched = await self._click_nav_entry(page, meta)
@@ -2314,18 +2379,48 @@ class ModaoExtractor:
                         logger.warning(f"页面[{pid}] 点击目录条目失败: {e}")
                     if not switched:
                         try:
-                            await page.evaluate(f"render('{pid}')")
+                            for js in (
+                                f"if (typeof vDirectory === 'function') vDirectory('{pid}'); else if (typeof render === 'function') render('{pid}')",
+                                f"render('{pid}')",
+                            ):
+                                try:
+                                    await page.evaluate(js)
+                                    break
+                                except Exception:
+                                    continue
                             await page.wait_for_timeout(250)
                         except Exception as e:
                             logger.warning(f"页面[{pid}] render 失败: {e}")
 
-                    # 读取屏幕文本
+                    # 读取屏幕文本及运行时渲染的需求说明正文（兼容动态脚本注入的 spec/templates）
                     try:
-                        stxt = await page.evaluate("""() => {
-                            const el = document.querySelector('.phone') || document.querySelector('.screen') || document.body;
-                            return el ? (el.innerText || el.textContent || '') : '';
-                        }""")
-                        screen_texts[pid] = (stxt or '').strip()
+                        dom_pair = await page.evaluate("""(pid) => {
+                            const phoneEl = document.querySelector('.phone') || document.querySelector('.screen');
+                            const phoneTxt = phoneEl
+                                ? (phoneEl.innerText || phoneEl.textContent || '')
+                                : (document.body ? (document.body.innerText || '') : '');
+                            let specTxt = '';
+                            const specEl = document.querySelector('#notes, .notes, #specBody, #specContent, #spec, .spec-body, .spec-content, .spec');
+                            if (specEl && specEl !== phoneEl && (!phoneEl || !phoneEl.contains(specEl))) {
+                                specTxt = specEl.innerText || specEl.textContent || '';
+                            } else {
+                                const rawSpec = (typeof specEdits !== 'undefined' && specEdits && specEdits[pid])
+                                    || (typeof defaultSpecs !== 'undefined' && defaultSpecs && defaultSpecs[pid])
+                                    || (typeof templates !== 'undefined' && templates && templates[pid])
+                                    || '';
+                                if (typeof rawSpec === 'string' && rawSpec) {
+                                    const tmp = document.createElement('div');
+                                    tmp.innerHTML = rawSpec;
+                                    specTxt = tmp.innerText || tmp.textContent || '';
+                                }
+                            }
+                            return {
+                                phone: (phoneTxt || '').trim(),
+                                spec: (specTxt || '').trim()
+                            };
+                        }""", pid)
+                        screen_texts[pid] = (dom_pair.get('phone') or '').strip()
+                        page_entry['spec_text'] = (dom_pair.get('spec') or '').strip()
                     except Exception:
                         screen_texts[pid] = ''
 
@@ -2574,12 +2669,21 @@ class ModaoExtractor:
         shot_manifest: Dict[int, Dict[str, Any]] = {}
         try:
             screen_texts, shot_manifest, _effective_meta = asyncio.run(
-                self._capture_singlefile_h5_session(url, pages_meta, cookie_dict=cookie_dict, prototype_id=_proto_id)
+                self._capture_singlefile_h5_session(
+                    url, pages_meta, cookie_dict=cookie_dict,
+                    prototype_id=_proto_id, target_set=_target_set
+                )
             )
             # 会话内可能用左侧目录覆盖了页面清单，必须取回实际使用的那一份，
             # 否则下面组装仍用正则解析出的旧清单（含大量已废弃 id）。
             if _effective_meta:
                 pages_meta = _effective_meta
+            # 补充运行时新增/修改的页面标题与分组到全局导航剔除集
+            for _m in pages_meta:
+                for _k in ('title', 'group'):
+                    _v = str(_m.get(_k) or '').strip()
+                    if _v:
+                        h5_global_lines.add(_v)
         except Exception as e:
             logger.warning(f'单文件H5 会话截图连拍失败，回退为空: {e}')
 
@@ -2605,8 +2709,11 @@ class ModaoExtractor:
                 page_name = f'{group}-{title}' if group else title
                 tpl_html = templates.get(pid, '')
                 dom_text = ''
-                if isinstance(tpl_html, str):
+                if isinstance(tpl_html, str) and tpl_html.strip():
                     dom_text = html.unescape(_TAG_RE.sub(' ', tpl_html)).strip()
+                rt_spec = ((shot_manifest.get(idx) or {}).get('spec_text') or '').strip()
+                if rt_spec:
+                    dom_text = rt_spec
                 stxt = (screen_texts.get(pid) or '').strip()
                 if stxt:
                     dom_text = (dom_text + '\n[手机界面] ' + stxt).strip()
@@ -2616,7 +2723,7 @@ class ModaoExtractor:
                 page_vision_summary = vdata.get('visual_summary', '')
                 page_vision_artifacts = list(vdata.get('visual_artifacts') or [])
 
-                # 融合子状态增量视觉文本与组件坐标
+                # 融合子状态增量视觉文本与组件坐标（行级去重：剔除已在主图/前序状态出现的重复行，防止视觉批次膨胀）
                 states_info = vdata.get('states_data', [])
                 for st_item in states_info:
                     st_name = st_item.get('state')
@@ -2625,16 +2732,18 @@ class ModaoExtractor:
                     if st_sum and st_sum != '(无结构变更)':
                         page_vision_summary = (page_vision_summary + f'\n[状态:{st_name}]\n' + st_sum).strip()
                     if st_txt:
-                        vision_text = (vision_text + f'\n[状态:{st_name}]\n' + st_txt).strip()
+                        dedup_st_txt = _dedup_state_vision_text(vision_text, st_txt)
+                        if dedup_st_txt:
+                            vision_text = (vision_text + f'\n[状态:{st_name}]\n' + dedup_st_txt).strip()
                     if st_item.get('artifacts'):
                         page_vision_artifacts.extend(st_item['artifacts'])
 
-                # 代表截图优先取状态截图或默认全景
+                # 代表截图优先取默认全景主图（保证画布主展示位为页面默认常态全貌，子状态截图用于增量视觉分析）
                 entry = shot_manifest.get(idx) or {}
-                st_shots = entry.get('state_shots', [])
-                shot_file = st_shots[-1]['shot_path'] if st_shots else entry.get('default_shot')
+                shot_file = entry.get('default_shot')
                 if not shot_file or not os.path.exists(shot_file):
-                    shot_file = entry.get('default_shot')
+                    st_shots = entry.get('state_shots', [])
+                    shot_file = st_shots[0]['shot_path'] if st_shots else None
                 screenshot_path = os.path.relpath(shot_file, self.media_root) if shot_file and os.path.exists(shot_file) else ''
 
                 vision_attempted = bool(vision_config)
@@ -2700,7 +2809,12 @@ class ModaoExtractor:
                         '画布无有效正文内容，未纳入需求分析')
                     _sig_map.setdefault('__blank__' + str(pg.get('page_no')), []).append(pg)
                     continue
-                _sig = hashlib.sha256(_stxt.encode('utf-8')).hexdigest()
+                # 画面指纹：结合手机屏幕文本与需求说明(dom_text)综合计算；
+                # 只有当屏幕文本与右侧需求说明完全相同时才归并为同一画面，
+                # 避免「屏幕相同但需求说明独立」(如首页角色分类设置)被误当作重复页丢弃。
+                _dtxt = (pg.get('dom_text') or '').strip()
+                _comb = f"{_stxt}\n---\n{_dtxt}"
+                _sig = hashlib.sha256(_comb.encode('utf-8')).hexdigest()
                 _sig_map.setdefault(_sig, []).append(pg)
 
             _merged: List[Dict[str, Any]] = []
@@ -2763,7 +2877,11 @@ class ModaoExtractor:
         fused_requirements: List[Dict[str, Any]] = []
         if dual_fusion and fusion_config:
             try:
-                fused_requirements = asyncio.run(self.dual_fusion_requirements(pages, fusion_config))
+                fused_requirements = asyncio.run(
+                    self.dual_fusion_requirements(pages, fusion_config, prototype_id=_proto_id)
+                )
+            except ModaoTerminateError:
+                raise
             except Exception as e:
                 logger.warning(f'单文件H5 双路融合失败（已跳过）: {e}')
                 warnings.append(f'双路融合失败（已跳过）: {e}')
@@ -4797,6 +4915,8 @@ class ModaoExtractor:
         fusion_config: 具备文本能力的 AIModelConfig（如 analyzer）。
         返回融合需求数组（含 sources/confidence/evidence）。失败返回空列表，不抛异常。
         """
+        if prototype_id is None:
+            prototype_id = getattr(self, 'prototype_id', None)
         _raise_if_terminated(prototype_id)
         if not fusion_config:
             return []
@@ -4825,38 +4945,77 @@ class ModaoExtractor:
         if not dom_all and not vis_all:
             _dbg = '[FUSION] both dom/vis empty -> return []\n'
             print(_dbg, flush=True)
-            with open(os.path.join(self.shot_dir, '_fusion_debug.log'), 'a') as _df: _df.write(_dbg)
+            if getattr(self, 'shot_dir', None):
+                    try:
+                        with open(os.path.join(self.shot_dir, '_fusion_debug.log'), 'a') as _df: _df.write(_dbg)
+                    except Exception: pass
             return []
         _dbg = f'[FUSION] START dom_pages={len(dom_all)} vis_pages={len(vis_all)} dom_total={dom_total}\n'
         print(_dbg, flush=True)
-        with open(os.path.join(self.shot_dir, '_fusion_debug.log'), 'a') as _df: _df.write(_dbg)
-        # 并行优化：DOM 抽取与视觉抽取两路输入完全独立，用 gather 同时发起，
-        # 把两次串行 LLM 调用压缩为一次（耗时 ≈ max(dom, vis) 而非 sum），最后再融合。
+        if getattr(self, 'shot_dir', None):
+                    try:
+                        with open(os.path.join(self.shot_dir, '_fusion_debug.log'), 'a') as _df: _df.write(_dbg)
+                    except Exception: pass
+        # 共享信号量控制总并发：DOM 抽取与视觉抽取两路及内部批次共用同一 Semaphore，
+        # 避免内外层并发叠加触发 API 429 限流，同时消灭多批次串行排队。
+        shared_sem = asyncio.Semaphore(DUAL_EXTRACT_CONCURRENCY)
         if dom_all and vis_all:
             dom_reqs, vis_reqs = await asyncio.gather(
-                self._dual_extract_one(AIModelService, fusion_config, dom_all),
-                self._dual_extract_one(AIModelService, fusion_config, vis_all),
+                self._dual_extract_one(
+                    AIModelService, fusion_config, dom_all,
+                    sem=shared_sem, prototype_id=prototype_id, path_label='dom'
+                ),
+                self._dual_extract_one(
+                    AIModelService, fusion_config, vis_all,
+                    sem=shared_sem, prototype_id=prototype_id, path_label='vis'
+                ),
             )
         elif dom_all:
-            dom_reqs = await self._dual_extract_one(AIModelService, fusion_config, dom_all)
+            dom_reqs = await self._dual_extract_one(
+                AIModelService, fusion_config, dom_all,
+                sem=shared_sem, prototype_id=prototype_id, path_label='dom'
+            )
             vis_reqs = []
         else:
             dom_reqs = []
-            vis_reqs = await self._dual_extract_one(AIModelService, fusion_config, vis_all)
-        fused = await self._dual_fuse(AIModelService, fusion_config, dom_reqs, vis_reqs, dom_total)
+            vis_reqs = await self._dual_extract_one(
+                AIModelService, fusion_config, vis_all,
+                sem=shared_sem, prototype_id=prototype_id, path_label='vis'
+            )
+        fused = await self._dual_fuse(
+            AIModelService, fusion_config, dom_reqs, vis_reqs, dom_total,
+            sem=shared_sem, prototype_id=prototype_id
+        )
         _dbg = f'[FUSION] END total_fused={len(fused)}\n'
         print(_dbg, flush=True)
-        with open(os.path.join(self.shot_dir, '_fusion_debug.log'), 'a') as _df: _df.write(_dbg)
+        if getattr(self, 'shot_dir', None):
+                    try:
+                        with open(os.path.join(self.shot_dir, '_fusion_debug.log'), 'a') as _df: _df.write(_dbg)
+                    except Exception: pass
         return fused
 
-    async def _dual_extract_one(self, aim_service, fusion_config, blocks):
-        """单路分批抽取；按完整页面分组，禁止整体截断导致尾部页面丢失。"""
+    async def _dual_extract_one(self, aim_service, fusion_config, blocks,
+                                sem: Optional[asyncio.Semaphore] = None,
+                                prototype_id: Optional[int] = None,
+                                path_label: str = 'extract'):
+        """单路分批抽取；按完整页面分组，使用信号量受控并发 + 固定下标槽位归位，100% 保证输出顺序与串行一致。"""
+        _raise_if_terminated(prototype_id)
         batches = []
         current = []
         current_len = 0
         for block in blocks:
-            # 单页异常超长时按字符切片，但每片都保留原页面标题。
-            pieces = [block[i:i + 10000] for i in range(0, len(block), 10000)] or ['']
+            block_str = block or ''
+            # 单页异常超长时按字符切片，并为后续分片补齐原页面标题头，防止跨片丢失页面归属。
+            header_prefix = ''
+            first_nl = block_str.find('\n')
+            if block_str.startswith('### ') and first_nl != -1:
+                header_prefix = block_str[:first_nl + 1]
+            raw_pieces = [block_str[i:i + 10000] for i in range(0, len(block_str), 10000)] or ['']
+            pieces = []
+            for p_idx, piece in enumerate(raw_pieces):
+                if p_idx > 0 and header_prefix and not piece.startswith('### '):
+                    piece = header_prefix + piece
+                pieces.append(piece)
             for piece in pieces:
                 if current and current_len + len(piece) > 12000:
                     batches.append(current)
@@ -4866,28 +5025,65 @@ class ModaoExtractor:
         if current:
             batches.append(current)
 
-        requirements = []
-        for batch_no, batch in enumerate(batches, 1):
-            messages = [
-                {'role': 'system', 'content': DUAL_EXTRACT_PROMPT},
-                {'role': 'user', 'content': f'批次 {batch_no}/{len(batches)} 页面内容:\n' + '\n\n'.join(batch)},
-            ]
-            try:
-                result = await aim_service.call_openai_compatible_api(
-                    fusion_config, messages, max_tokens=16000)
-                content = (result['choices'][0]['message']['content'] or '') if result else ''
-                parsed = _parse_llm_json_array(content)
-                _dbg = (f'[FUSION] extract_batch {batch_no}/{len(batches)} '
-                        f'raw_len={len(content)} parsed={len(parsed)}\n')
-                print(_dbg, flush=True)
-                with open(os.path.join(self.shot_dir, '_fusion_debug.log'), 'a') as _df: _df.write(_dbg)
-                requirements.extend(parsed)
-            except Exception as e:
-                raise RuntimeError(f'双路抽取第 {batch_no}/{len(batches)} 批失败: {e}') from e
+        if not batches:
+            return []
+
+        effective_sem = sem or asyncio.Semaphore(DUAL_EXTRACT_CONCURRENCY)
+        total_batches = len(batches)
+        # 预分配固定长度槽位：batch_results[idx] 永远对应第 idx+1 批，消除并发返回快慢导致的乱序
+        batch_results: List[List[Dict[str, Any]]] = [[] for _ in range(total_batches)]
+
+        async def _run_batch(idx: int, batch_no: int, batch: List[str]):
+            _raise_if_terminated(prototype_id)
+            async with effective_sem:
+                _raise_if_terminated(prototype_id)
+                messages = [
+                    {'role': 'system', 'content': DUAL_EXTRACT_PROMPT},
+                    {'role': 'user', 'content': f'批次 {batch_no}/{total_batches} 页面内容:\n' + '\n\n'.join(batch)},
+                ]
+                last_err = None
+                for attempt in range(2):
+                    _raise_if_terminated(prototype_id)
+                    try:
+                        t_b0 = time.time()
+                        result = await aim_service.call_openai_compatible_api(
+                            fusion_config, messages, max_tokens=16000)
+                        content = (result['choices'][0]['message']['content'] or '') if result else ''
+                        parsed = _parse_llm_json_array(content)
+                        elapsed = time.time() - t_b0
+                        _dbg = (f'[FUSION] extract_batch {batch_no}/{total_batches} ({path_label}) '
+                                f'raw_len={len(content)} parsed={len(parsed)} elapsed={elapsed:.1f}s\n')
+                        print(_dbg, flush=True)
+                        if getattr(self, 'shot_dir', None):
+                            try:
+                                with open(os.path.join(self.shot_dir, '_fusion_debug.log'), 'a') as _df:
+                                    _df.write(_dbg)
+                            except Exception:
+                                pass
+                        batch_results[idx] = parsed
+                        return
+                    except ModaoTerminateError:
+                        raise
+                    except Exception as e:
+                        last_err = e
+                        if attempt == 0:
+                            await asyncio.sleep(1.5)
+                raise RuntimeError(f'双路抽取第 {batch_no}/{total_batches} 批失败: {last_err}') from last_err
+
+        await asyncio.gather(*[
+            _run_batch(i, i + 1, batch)
+            for i, batch in enumerate(batches)
+        ])
+
+        requirements: List[Dict[str, Any]] = []
+        for sub in batch_results:
+            requirements.extend(sub)
         return requirements
 
-    async def _dual_fuse(self, aim_service, fusion_config, dom_reqs, vis_reqs, dom_len):
-        """交叉融合两路需求数组；解析失败/截断时降级为两路并集，避免整体读取被阻断。"""
+    async def _dual_fuse_single_batch(self, aim_service, fusion_config, dom_reqs, vis_reqs, dom_len,
+                                      batch_label: str = '1/1', prototype_id: Optional[int] = None):
+        """单批次交叉融合；当输出因截断无法解析时降级为该批次内的两路并集。"""
+        _raise_if_terminated(prototype_id)
         if not dom_reqs and not vis_reqs:
             return []
         user = (
@@ -4904,23 +5100,150 @@ class ModaoExtractor:
                 fusion_config, messages, max_tokens=16000)
             content = (result['choices'][0]['message']['content'] or '') if result else ''
             parsed = _parse_llm_json_array(content)
-            _dbg = (f'[FUSION] fuse_reqs dom={len(dom_reqs)} vis={len(vis_reqs)} '
+            _dbg = (f'[FUSION] fuse_reqs ({batch_label}) dom={len(dom_reqs)} vis={len(vis_reqs)} '
                     f'raw_len={len(content)} parsed={len(parsed)}\n')
             print(_dbg, flush=True)
-            with open(os.path.join(self.shot_dir, '_fusion_debug.log'), 'a') as _df: _df.write(_dbg)
+            if getattr(self, 'shot_dir', None):
+                try:
+                    with open(os.path.join(self.shot_dir, '_fusion_debug.log'), 'a') as _df:
+                        _df.write(_dbg)
+                except Exception:
+                    pass
             if parsed:
                 return parsed
-            # 融合输出无法解析（多为输出被 max_tokens 截断）：降级为两路并集，
-            # 保证阶段0门禁不因一次性解析失败而把整轮读取判失败。
-            _dbg2 = '[FUSION] fuse parse failed -> fallback to union of two paths\n'
+            _dbg2 = f'[FUSION] fuse parse failed ({batch_label}) -> fallback to union of two paths\n'
             print(_dbg2, flush=True)
-            with open(os.path.join(self.shot_dir, '_fusion_debug.log'), 'a') as _df: _df.write(_dbg2)
+            if getattr(self, 'shot_dir', None):
+                try:
+                    with open(os.path.join(self.shot_dir, '_fusion_debug.log'), 'a') as _df:
+                        _df.write(_dbg2)
+                except Exception:
+                    pass
             return list(dom_reqs or []) + list(vis_reqs or [])
+        except ModaoTerminateError:
+            raise
         except Exception as e:
             raise RuntimeError(f'双路交叉融合失败: {e}') from e
 
+    async def _dual_fuse(self, aim_service, fusion_config, dom_reqs, vis_reqs, dom_len,
+                         sem: Optional[asyncio.Semaphore] = None,
+                         prototype_id: Optional[int] = None):
+        """交叉融合两路需求数组；超过阈值时按所属页面/模块归组分批并发融合，防止单次输出超出 max_tokens 截断。"""
+        _raise_if_terminated(prototype_id)
+        if not dom_reqs and not vis_reqs:
+            return []
+        total_items = len(dom_reqs or []) + len(vis_reqs or [])
+        if total_items <= DUAL_FUSE_BATCH_LIMIT:
+            return await self._dual_fuse_single_batch(
+                aim_service, fusion_config, dom_reqs, vis_reqs, dom_len,
+                batch_label='1/1', prototype_id=prototype_id
+            )
+
+        # 按页面/模块归桶，确保同一页面的 DOM 需求与视觉需求在同一个批次内交叉比对
+        def _req_key(item: Any) -> str:
+            if isinstance(item, dict):
+                sp = item.get('source_pages')
+                if isinstance(sp, list) and sp and str(sp[0]).strip():
+                    return str(sp[0]).strip()
+                mod = str(item.get('module') or '').strip()
+                if mod:
+                    return mod
+            return '__default__'
+
+        group_order: List[str] = []
+        dom_by_key: Dict[str, List[Any]] = {}
+        vis_by_key: Dict[str, List[Any]] = {}
+        for r in (dom_reqs or []):
+            k = _req_key(r)
+            if k not in dom_by_key and k not in vis_by_key:
+                group_order.append(k)
+            dom_by_key.setdefault(k, []).append(r)
+        for r in (vis_reqs or []):
+            k = _req_key(r)
+            if k not in dom_by_key and k not in vis_by_key:
+                group_order.append(k)
+            vis_by_key.setdefault(k, []).append(r)
+
+        fuse_batches: List[tuple] = []
+        cur_dom: List[Any] = []
+        cur_vis: List[Any] = []
+        for k in group_order:
+            k_dom = dom_by_key.get(k, [])
+            k_vis = vis_by_key.get(k, [])
+            # 单页面自身超长时切片打包
+            if len(k_dom) + len(k_vis) > DUAL_FUSE_BATCH_LIMIT:
+                if cur_dom or cur_vis:
+                    fuse_batches.append((cur_dom, cur_vis))
+                    cur_dom, cur_vis = [], []
+                half = max(1, DUAL_FUSE_BATCH_LIMIT // 2)
+                max_steps = max(
+                    (len(k_dom) + half - 1) // half,
+                    (len(k_vis) + half - 1) // half,
+                    1
+                )
+                for s_idx in range(max_steps):
+                    d_slice = k_dom[s_idx * half:(s_idx + 1) * half]
+                    v_slice = k_vis[s_idx * half:(s_idx + 1) * half]
+                    if d_slice or v_slice:
+                        fuse_batches.append((d_slice, v_slice))
+                continue
+
+            if (cur_dom or cur_vis) and (len(cur_dom) + len(cur_vis) + len(k_dom) + len(k_vis) > DUAL_FUSE_BATCH_LIMIT):
+                fuse_batches.append((cur_dom, cur_vis))
+                cur_dom, cur_vis = [], []
+            cur_dom.extend(k_dom)
+            cur_vis.extend(k_vis)
+        if cur_dom or cur_vis:
+            fuse_batches.append((cur_dom, cur_vis))
+
+        effective_sem = sem or asyncio.Semaphore(DUAL_EXTRACT_CONCURRENCY)
+        num_batches = len(fuse_batches)
+        batch_outputs: List[List[Dict[str, Any]]] = [[] for _ in range(num_batches)]
+
+        async def _run_fuse_batch(idx: int, b_dom: List[Any], b_vis: List[Any]):
+            _raise_if_terminated(prototype_id)
+            async with effective_sem:
+                _raise_if_terminated(prototype_id)
+                res = await self._dual_fuse_single_batch(
+                    aim_service, fusion_config, b_dom, b_vis, dom_len,
+                    batch_label=f'{idx + 1}/{num_batches}', prototype_id=prototype_id
+                )
+                batch_outputs[idx] = res
+
+        await asyncio.gather(*[
+            _run_fuse_batch(i, b_d, b_v)
+            for i, (b_d, b_v) in enumerate(fuse_batches)
+        ])
+
+        merged: List[Dict[str, Any]] = []
+        for sub in batch_outputs:
+            merged.extend(sub)
+        return merged
+
 
 # ---------- 模块级常量与工具（双路融合用） ----------
+DUAL_EXTRACT_CONCURRENCY = 5
+DUAL_FUSE_BATCH_LIMIT = 100
+
+
+def _dedup_state_vision_text(base_text: str, state_text: str) -> str:
+    """剔除子状态 OCR 文本中已在当前页面主图/前序状态出现过的完全相同行，仅保留增量行。"""
+    if not state_text:
+        return ''
+    if not base_text:
+        return state_text.strip()
+    seen_lines = {ln.strip() for ln in base_text.splitlines() if ln.strip()}
+    kept = []
+    for ln in state_text.splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if s not in seen_lines:
+            kept.append(ln)
+            seen_lines.add(s)
+    return '\n'.join(kept).strip()
+
+
 DUAL_EXTRACT_PROMPT = (
     "你是资深需求分析师。请根据提供的页面内容，提取其中的功能需求点。"
     "输出 JSON 数组，每条包含：source_pages(证据页面名称数组)、module(所属模块)、feature(功能点)、"

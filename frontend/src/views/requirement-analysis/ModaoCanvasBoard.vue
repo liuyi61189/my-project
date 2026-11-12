@@ -85,7 +85,7 @@
               <el-card v-for="p in fg.pages" :key="p.id" class="canvas-card" shadow="hover"
                 :class="{ 'is-failed': p.stage_status === 'failed', 'is-active': p.stage_status === 'extracting', 'is-selected': p.selected }">
                 <el-image v-if="p.screenshot" class="card-thumb" :src="shotUrl(p.screenshot)"
-                  :preview-src-list="shotPreviewList(p)" :initial-index="0" fit="contain" hide-on-click-modal>
+                  :preview-src-list="shotPreviewList(p)" :initial-index="0" fit="contain" hide-on-click-modal lazy>
                   <template #error><div class="thumb-error">截图加载失败</div></template>
                 </el-image>
                 <div class="card-thumb thumb-empty" v-else>
@@ -106,7 +106,7 @@
                 <div class="card-meta">
                   <span>识别摘要：{{ p.recognition_note || '无' }}</span>
                 </div>
-                <div v-if="p.error_message" class="card-error">⚠ {{ p.error_message }}</div>
+                <div v-if="p.error_message && p.stage_status === 'failed'" class="card-error">⚠ {{ p.error_message }}</div>
                 <div class="card-actions">
                   <el-button type="primary" size="small" @click="openCanvas(p)">进入当前阶段</el-button>
                   <el-button size="small" @click="openCanvas(p)">查看产物</el-button>
@@ -118,7 +118,7 @@
       </el-tab-pane>
 
       <!-- ============ Tab2：跨画布用例集合 ============ -->
-      <el-tab-pane label="用例集合" name="cases">
+      <el-tab-pane label="用例集合" name="cases" lazy>
         <div class="cases-toolbar">
           <el-select v-model="caseFilter" placeholder="按画布筛选" clearable size="small" style="width: 260px">
             <el-option label="全部画布" value="all" />
@@ -169,7 +169,7 @@
     <!-- ============ 单画布详情抽屉 ============ -->
     <el-drawer :title="focused && ((focused.parent_name ? (focused.parent_name + ' / ') : '') + 'P' + focused.page_no + ' ' + (focused.page_name || '未命名画布')) + ' · 单画布流水线'"
       v-model="drawerVisible" size="62%" direction="rtl" @closed="focused = null">
-      <div v-if="focused" class="canvas-detail">
+      <div v-if="focused" class="canvas-detail" v-loading="_fullLoading" element-loading-text="正在加载画布详细产物...">
         <el-alert type="info" :closable="false" show-icon
           :title="`当前阶段：${stageMeta(focused.current_stage, focused.stage_status).label}`"
           :description="`单画布模式：每点击一次下方按钮只会对「P${focused.page_no} ${focused.page_name || '未命名画布'}」这一个画布生效，不影响其他画布（原型允许同名画布，以 P 页码区分）。`" />
@@ -269,6 +269,8 @@ export default {
       // 一旦补拉过，后续轮询也必须用全量，避免把抽屉/用例集合刚拿到的大字段清掉。
       _fullLoaded: false,
       _fullLoading: false,
+      _polling: false,
+      pollFailCount: 0,
     }
   },
   computed: {
@@ -369,6 +371,13 @@ export default {
       const total = (this.filteredPages || []).length
       return selected > 0 && selected < total
     },
+    isRunning() {
+      const protoBusy = Boolean(
+        this.proto && ['extracting', 'structuring', 'clarifying', 'designing'].includes(this.proto.status)
+      )
+      const pageBusy = Array.isArray(this.pages) && this.pages.some(p => p && p.stage_status === 'extracting')
+      return protoBusy || pageBusy
+    },
   },
   watch: {
     // 切到「用例集合」tab 时才需要逐页用例产物（allCases/allSmoke 会遍历
@@ -416,10 +425,13 @@ export default {
       return '/' + path
     },
     shotPreviewList(p) {
+      if (!p) return []
+      if (p._previewList) return p._previewList
       // 优先使用分段截图（超长画布被拆成多段）；否则仅主图
-      const segs = this.parseArr(p && p.screenshot_segments)
-      if (segs.length) return segs.map(s => this.shotUrl(s))
-      return p && p.screenshot ? [this.shotUrl(p.screenshot)] : []
+      const segs = this.parseArr(p.screenshot_segments)
+      const list = segs.length ? segs.map(s => this.shotUrl(s)) : (p.screenshot ? [this.shotUrl(p.screenshot)] : [])
+      p._previewList = list
+      return list
     },
     canvasLabel(p) {
       return (p.parent_name ? (p.parent_name + ' / ') : '') + (p.page_name || ('P' + p.page_no))
@@ -439,6 +451,7 @@ export default {
     },
     parseArr(s) {
       if (!s) return []
+      if (Array.isArray(s)) return s
       try {
         const v = JSON.parse(s)
         return Array.isArray(v) ? v : (v.data && Array.isArray(v.data) ? v.data : [])
@@ -455,42 +468,79 @@ export default {
       }
     },
     async loadDetail() {
+      if (this._polling) return
+      this._polling = true
       this.loading = true
       try {
-        // 首屏只拉轻量数据（?light=1）：完整详情实测 2113KB/5s，
-        // 其中 1091KB 是逐页用例产物，而画布卡片一个都不渲染。
-        // 轻量模式约 112KB（-95%）；切「用例集合」tab 或开「进入当前阶段」抽屉时
-        // 再由 ensureFullDetail() 补拉全量。
-        //
-        // ⚠️ 一旦拉过全量（_fullLoaded），之后的轮询也必须用全量：
-        // 否则 3 秒后 openCanvas/用例集合 刚拿到的 page_testcases_json 等
-        // 会被轻量响应覆盖掉，抽屉内容"闪一下又空了"。
-        const params = this._fullLoaded ? {} : { light: 1 }
-        const res = await request({ url: `${this.base()}/${this.protoId}/`, method: 'get', params })
-        this.proto = res.data
-        if (this._fullLoaded) {
-          // 保持抽屉聚焦对象同步到新的页面对象（loadDetail 会替换 pages 数组）
-          const fid = this.focused && this.focused.id
-          if (fid) {
-            const found = (this.pages || []).find(x => x.id === fid)
-            if (found) this.focused = found
-          }
+        // 性能与防超时修复（2026-11-06）：
+        // 轮询一律使用轻量模式（?light=1），仅跟踪画布状态和任务进度（约 112KB / 0.5s）。
+        // 绝不反复轮询全量详情（6.8MB），彻底避免网络与 Socket 队列拥塞导致 300000ms 超时。
+        // 全量业务产物（用例/测试点/摘要）由 ensureFullDetail() 按需拉取并缓存在内存中。
+        const res = await request({ url: `${this.base()}/${this.protoId}/`, method: 'get', params: { light: 1 } })
+
+        // 合并 proto 基础状态字段，保留已有的全量重度字段
+        this.proto = {
+          ...this.proto,
+          ...res.data,
+          testcases_json: res.data.testcases_json !== undefined ? res.data.testcases_json : this.proto?.testcases_json,
+          final_testpoints_json: res.data.final_testpoints_json !== undefined ? res.data.final_testpoints_json : this.proto?.final_testpoints_json,
+          extracted_json: res.data.extracted_json !== undefined ? res.data.extracted_json : this.proto?.extracted_json,
+          smoke_json: res.data.smoke_json !== undefined ? res.data.smoke_json : this.proto?.smoke_json,
         }
+
         const incoming = (res.data.pages || []).slice().sort((a, b) => (a.page_no || 0) - (b.page_no || 0))
         // 勾选状态以服务端为准（它已持久化），但用户刚点、还没写回完成的改动
         // 不能被轮询结果覆盖 —— 否则会出现"勾了又被弹回去"的抖动。
         const pending = this.pendingSelection
+        const oldMap = new Map((this.pages || []).map(x => [x.id, x]))
         this.pages = incoming.map(p => {
-          if (pending && Object.prototype.hasOwnProperty.call(pending, p.id)) {
-            return { ...p, selected: pending[p.id] }
+          const old = oldMap.get(p.id)
+          const targetSelected = (pending && Object.prototype.hasOwnProperty.call(pending, p.id)) ? pending[p.id] : p.selected
+          if (old &&
+              old.stage_status === p.stage_status &&
+              old.current_stage === p.current_stage &&
+              old.page_name === p.page_name &&
+              old.selected === targetSelected &&
+              old.error_message === p.error_message &&
+              old.recognition_note === p.recognition_note &&
+              old.screenshot === p.screenshot) {
+            return old
           }
-          return p
+          return {
+            ...old,
+            ...p,
+            // 保持可能已加载的重度业务产物不被 light 模式覆盖
+            page_summary: p.page_summary !== undefined ? p.page_summary : (old ? old.page_summary : undefined),
+            page_clarification: p.page_clarification !== undefined ? p.page_clarification : (old ? old.page_clarification : undefined),
+            page_testpoints_json: p.page_testpoints_json !== undefined ? p.page_testpoints_json : (old ? old.page_testpoints_json : undefined),
+            page_testcases_json: p.page_testcases_json !== undefined ? p.page_testcases_json : (old ? old.page_testcases_json : undefined),
+            page_smoke_json: p.page_smoke_json !== undefined ? p.page_smoke_json : (old ? old.page_smoke_json : undefined),
+            selected: targetSelected,
+          }
         })
-        if (this.isRunning) this.startPoll()
+        if (this.focused && this.focused.id) {
+          // 保持抽屉聚焦对象同步到更新后的新页面对象（保留已有的重字段）
+          const fid = this.focused.id
+          const found = (this.pages || []).find(x => x.id === fid)
+          if (found) this.focused = found
+        }
+        this.pollFailCount = 0
+        if (this.isRunning) {
+          this.startPoll()
+        } else {
+          this.stopPoll()
+        }
       } catch (e) {
-        this.$message.error('加载失败：' + (e.response?.data?.detail || e.message))
+        this.pollFailCount = (this.pollFailCount || 0) + 1
+        if (this.pollFailCount >= 5) {
+          this.stopPoll()
+          this.$message.error('加载失败次数过多已停止轮询：' + (e.response?.data?.detail || e.message))
+        } else {
+          console.warn('[canvas-board] 轮询刷新失败:', e?.message)
+        }
       } finally {
         this.loading = false
+        this._polling = false
       }
     },
     /**
@@ -509,11 +559,14 @@ export default {
         const res = await request({ url: `${this.base()}/${this.protoId}/`, method: 'get' })
         const incoming = (res.data.pages || []).slice().sort((a, b) => (a.page_no || 0) - (b.page_no || 0))
         const pending = this.pendingSelection
+        const oldMap = new Map((this.pages || []).map(x => [x.id, x]))
         this.pages = incoming.map(p => {
-          if (pending && Object.prototype.hasOwnProperty.call(pending, p.id)) {
-            return { ...p, selected: pending[p.id] }
+          const old = oldMap.get(p.id) || {}
+          return {
+            ...old,
+            ...p,
+            selected: (pending && Object.prototype.hasOwnProperty.call(pending, p.id)) ? pending[p.id] : p.selected,
           }
-          return p
         })
         // 顶层字段（testcases_json/merged_testcases_json 等）也一并补上，
         // 但保留轻量阶段已有的 proto 结构，避免覆盖掉首屏正在用的字段
@@ -706,9 +759,6 @@ export default {
       } finally {
         this.busy = false
       }
-    },
-    get isRunning() {
-      return this.proto && ['extracting', 'structuring', 'clarifying', 'designing'].includes(this.proto.status)
     },
     startPoll() {
       this.stopPoll()
