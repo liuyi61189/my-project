@@ -52,12 +52,27 @@ TestHub 是一套前后端分离的智能测试管理与自动化执行平台，
 - API 返回形式以相邻接口和前端调用约定为准。项目大量接口使用 `{code, data, message}`，但并非所有 DRF/SSE/文件响应都适合强行套该格式。
 - 数据库变更优先走 Django migration；仓库包含历史手工 SQL/修复脚本，使用前必须确认目标库状态，避免重复执行。
 
-#### 后端镜像构建慢/重建耗时的排查（2026-09-17 实测定型）
+#### 后端镜像构建耗时：先分清"代码重建"还是"base 重建"（2026-11-12 更新）
 
-> **触发场景**：`docker compose build backend` 长时间停在下载依赖（现象如"已运行 29 分钟 / 下载到第 N 个包 / 60-80 KB/s"）。
-> **先别急着重下，按下面顺序 30 秒定位，多数情况是可避免的白工。**
+**当前结构（2026-10-10 起）**：`Dockerfile.backend` 只剩 `FROM testhub-backend-base:<tag>` + `COPY . .` + `RUN mkdir` + `CMD`。
+apt / pip（243 包）/ Playwright Chromium 全部预先烧在 **base 镜像**里，所以"改代码重建要一小时"这个老结论已经不成立。
 
-**1. 先确认缓存是否还在（不是猜，直接查）**
+| 场景 | 实测耗时 |
+|---|---|
+| 只改后端代码，base 镜像在本地 | `docker build` **2.5 秒**；+ compose 替换容器合计约 30 秒 |
+| base 镜像缺失 / tag 被改 / 被 prune 掉 | 退回全量构建：apt 5~20 分钟 + pip 30~40 分钟 + playwright 30~50 分钟 |
+| 改了 `requirements*.txt` / 系统包 / playwright 版本 | **必须重建 base**，只重建后端镜像没用（新包在容器里根本不存在） |
+
+**第一步永远是判类型，不是盯日志**：
+
+```powershell
+docker image inspect testhub-backend-base:<Dockerfile.backend 里 FROM 的 tag> --format '{{.Id}} {{.Created}}'
+```
+
+- 有输出 → 代码重建，秒级；此时"慢"只能来自上下文过大（见 `.dockerignore`）、磁盘或杀软，不是依赖下载。
+- 报 `No such image` → base 重建，小时级属预期，别误判成"卡死"。
+
+**base 重建卡住时：先确认缓存是否还在（不是猜，直接查）**
 
 ```powershell
 docker buildx du --verbose | Select-String -Pattern "Description|Last used" -Context 0,1
@@ -71,7 +86,7 @@ docker buildx du --verbose | Select-String -Pattern "Description|Last used" -Con
 | `Last used: 2 weeks ago`（值很旧） | 该层**本次尚未轮到**，前一层还没过 |
 | 找不到某层 | 缓存被清了（`buildx prune` / 磁盘清理） |
 
-**2. 平行看镜像与容器（判断"构建是否已产出"）**
+**平行看镜像与容器（判断"构建是否已产出"）**
 
 ```powershell
 docker images --format "{{.Repository}} | {{.Size}} | {{.CreatedSince}}" | Select-String testhub-backend
@@ -81,60 +96,61 @@ docker ps --format "{{.Names}} | {{.Status}}" | Select-String testhub-backend
 - 镜像 `CreatedSince` 仍是旧的 **且** 容器 `Up N hours` 未被重启 → **构建还没产出，仍在进行**。
 - 镜像已更新 / 容器刚重启 → 构建已完成。
 
-**3. `Dockerfile.backend` 各层的缓存强度不同（这是"为什么慢"的根因）**
+**base 重建时的缓存强度差异（只有重建 base 才会遇到）**
 
-| 层 | 缓存机制 | 失效后代价 |
+| 层（在 `Dockerfile.backend-deps` 里） | 缓存机制 | 失效后代价 |
 |---|---|---|
-| `apt-get install ...`（第 10~23 行） | **普通 Docker 层缓存，无 cache mount** | ⚠️ **最慢**，全量装 gcc/build-essential/libgl 等约 200~300MB，国内访问 `deb.debian.org` 常只有几十 KB/s |
-| `pip install -r requirements.lock.txt`（第 38 行） | `--mount=type=cache,target=/root/.cache/pip`（1.4GB 级） | 中等；缓存命中则秒过，**未命中会全量下 243 个包** |
-| `playwright install chromium`（第 41 行） | 普通层缓存 | 慢，需下 Chromium ~150MB + apt 装图形库 |
-| `COPY . .`（第 44 行） | 普通层缓存，**源码必变** | 正常重建，几分钟 |
+| `apt-get install ...` | 普通 Docker 层缓存，**无 cache mount** | ⚠️ 最慢，200~300MB，国内访问 `deb.debian.org` 常只有几十 KB/s |
+| `pip install -r requirements.lock.txt` | `--mount=type=cache,target=/root/.cache/pip`（1.4GB 级） | 命中则秒过，**未命中全量下 243 个包** |
+| `playwright install chromium` | 普通层缓存 | 慢，Chromium ~150MB + apt 图形库 |
+| `COPY . .`（在 `Dockerfile.backend` 里） | 普通层缓存，**源码必变** | 实测本轮只需秒级 |
 
 **⚠️ 关键认知：`--mount=type=cache` 的缓存挂在「宿主机 Docker」上，不在镜像里。**
 所以"以前构建过"不代表"这次不用重下"——**镜像层缓存和 cache mount 任缺其一都会退化为全量下载**。
 
-**⚠️ 另一个高频误判：`pip` 慢 vs `apt` 慢。**
+**⚠️ 高频误判：`pip` 慢 vs `apt` 慢。**
 若 `buildx du` 显示**正在被使用的是 `apt-get` 那一层**，那么慢的是 **apt（Debian 源）**，不是 pip；
 此时"换 PyPI 镜像源"完全无效，**要换的是 Debian 源**。
 
-**4. 三条铁律（避免把几分钟的活干成几十分钟）**
+**铁律**
 
-- **禁止 `--no-cache`**：会让 `COPY requirements.lock.txt` 层失效 → 后面整条链全废 → 全量重下 243 包。
-  仅当**前端 COPY 层**确需刷新时才考虑（那也只需重建 frontend）。
-- **只改代码时根本不需要重建镜像**：生产/开发同步后端 `.py` 一律走 `docker cp`（见下），秒级完成、不碰依赖。
-- **改动 `Dockerfile.backend` 任何一行都会使其后所有层失效**，因此**不要在有人正在构建时改它**；
-  改完后的**首次**构建必然重跑 apt + pip，属预期，之后恢复命中。
+- **禁止 `--no-cache`**：会让依赖层全部失效，把秒级的活干成小时级。
+- **不要手改 `Dockerfile.backend-base`**：它由 `scripts/gen_backend_base.py` 从 `Dockerfile.backend-deps` 生成，
+  任意一个字节差异都会变成 cache miss（2026-10-10 踩过）。要改依赖层请改 `Dockerfile.backend-deps` 后重新生成。
+- **改 `Dockerfile.backend` 的 `FROM` 或改 `Dockerfile.backend-deps` 都算"改依赖结构"**：
+  先按上面的判类型流程确认预期耗时（小时级）再动手，且不要在别人正构建时改。
 
-**5. lock 文件的两个数字别搞混**
-
-`requirements.lock.txt` **总行数 254**，但**实际包数量 243**（254 含空行/注释）。
-看到"第 57/254"这类输出时，254 是**行数**不是包数，**不要据此推断"lock 被改过"**。
-校验 lock 是否真被改：`git diff requirements.lock.txt`（空 = 未改）。
-
-**6. 只同步后端代码时的标准流程（不重建镜像）**
+**部署统一入口：`scripts/deploy_prod.ps1`（不要再手搓 docker cp）**
 
 ```powershell
-# Windows 下 docker cp 目录会随机漏文件 → 先在宿主打 tar
-tar -cf _sync.tar -C <repo根> apps backend
-docker cp _sync.tar testhub-backend:/tmp/
-docker exec testhub-backend sh -c "tar -xf /tmp/_sync.tar -C /app && find /app -name __pycache__ -type d -exec rm -rf {} +"
-docker restart testhub-backend
-# 等约 25s 后验证（404 = Django dev 正常活着）
-curl -w "%{http_code}" http://localhost:8000/api/
+.\scripts\deploy_prod.ps1 -All -DryRun            # 只打印部署计划，不动任何东西
+.\scripts\deploy_prod.ps1 -BackendOnly            # 默认：重建镜像 + compose 替换 + 健康检查
+.\scripts\deploy_prod.ps1 -BackendOnly -HotPatch  # 应急：tar + docker cp + restart（约 15 秒）
+.\scripts\deploy_prod.ps1 -ChangedFilesFile changed.txt   # CI 按改动文件自动判定范围
 ```
 
-**7. 构建耗时的真实参考（2026-09-17 实测：全量重建约 1 小时）**
+- 后端默认走**镜像重建**（秒级且持久）。`-HotPatch` 的改动在容器下次被重建时**会全部丢失**，因为 `/app` 不是 bind mount。
+- Windows 下 `docker cp` 拷目录会随机漏文件：热更新必须先 `tar -cf` 再 `docker cp` 单文件，容器内 `tar -xf -C /app` 解包并清 `__pycache__`（脚本已内置，且 `--exclude __pycache__`）。
+- 健康检查判据：`/api/` 返回 404 = Django 已起来；`/api/schema/` 必须 200（某个 ViewSet 的 `filterset_fields` 写错会让它 500）。
+- 后端容器是被 **`Recreate`** 而非 `restart`：这正是 `-HotPatch` 的代码会在下次发布时丢失的原因。
+  又因为 `nginx.conf` 里是静态 `proxy_pass http://testhub-backend:8000`（用**容器名**、nginx 只在启动时解析一次），
+  后端换 IP 后前端会**静默 502**：页面能打开、接口全挂。所以只发后端时，脚本会探测 `http://localhost:8080/api/`，异常自动重启前端容器。
+- CI 侧见 `.github/workflows/deploy-prod.yml`。runner 的 checkout 目录与生产编排目录（`TESTHUB_COMPOSE_DIR`，默认 `C:\TestHub`）是**两个目录**，
+  脚本所有 compose 调用都显式带 `-f <编排目录>/docker-compose.yml -p testhub`，否则会在 checkout 目录建出第二套容器/卷。
+- dev 环境演练同一脚本：`-ComposeFile docker-compose.dev.yml -ComposeProject testhub-dev -BackendContainer testhub-dev-backend-1`。
 
-`requirements.lock.txt`（243 包）全量重建（apt → pip → playwright → COPY）分布：
+**重建 base 镜像（唯一的小时级操作，且只在依赖/系统包变化时才需要）**
 
-| 阶段 | 实测 |
-|---|---|
-| apt（**无 cache mount**，走 Debian 官方源） | 5~20 分钟 |
-| pip（部分命中 cache mount，**新增包需真下载**） | 30~40 分钟 |
-| playwright chromium（**无 cache mount**，~150MB） | 30~50 分钟 |
-| COPY . . + 导出镜像 | 3~6 分钟 |
+```powershell
+python scripts/gen_backend_base.py                                    # 重新生成 Dockerfile.backend-base
+docker build -f Dockerfile.backend-base -t testhub-backend-base:<YYYYMMDD> .
+# 把 Dockerfile.backend 的 FROM 改成新 tag，再 .\scripts\deploy_prod.ps1 -BackendOnly
+```
 
-**⚠️ 判断构建是否卡死不能只看 `docker buildx du`**：
+**lock 文件的两个数字别搞混**：`requirements.lock.txt` **总行数 254**，但**实际包数 243**（254 含空行/注释）。
+看到"第 57/254"里的 254 是行数不是包数，不要据此推断 lock 被改过；校验用 `git diff requirements.lock.txt`。
+
+**⚠️ 判断 base 构建是否卡死不能只看 `docker buildx du`**：
 `Last used` **只在挂载那一刻更新一次**，不反映层内部进度。
 实例：pip 正在下载一个 47.7MB 的大包时，`Last used` 会一直停在"37 分钟前"不动，
 看起来像"卡死/中断"，实际构建完全正常。
@@ -287,7 +303,7 @@ TestHub 是**公共测试平台**：设备插在任意一台局域网电脑上�
 | appium-android-run-pytest | Agent Skill | `.codebuddy/skills/appium-android-run-pytest/` | SKILL.md（标准） | AI 助理直接加载 | 同上 | 阶段2 |
 | appium-android-allure-report | Agent Skill | `.codebuddy/skills/appium-android-allure-report/` | SKILL.md（标准） | AI 助理直接加载 | 同上 | 阶段3 |
 | mobile-app-autotest | Agent Skill（导入·参考） | `_ext/mobile-app-autotest/mobile-app-autotest/` | SKILL.md（标准） | **未直接加载**（`_ext/` 非自动加载路径，仅作参考/待用） | 编辑 SKILL.md；`.cursor/` 路径残留已修 | **通用参考、非默认**；与 1/2/3 重叠，主线以 appium-android-* 为准 |
-| modao_skill | 应用内自定义 Skill | `apps/requirement_analysis/modao_skill/` | 文件夹式（无 SKILL.md） | requirement_analysis 应用（modao_views.py 等） | 编辑 prompts/templates/tools/workflow；改后 `docker-compose build backend && docker rm -f testhub-backend && docker-compose up -d backend` | 墨刀原型→测试用例 |
+| modao_skill | 应用内自定义 Skill | `apps/requirement_analysis/modao_skill/` | 文件夹式（无 SKILL.md） | requirement_analysis 应用（modao_views.py 等） | 编辑 prompts/templates/tools/workflow；改后用 `scripts/deploy_prod.ps1 -BackendOnly` 发布 | 墨刀原型→测试用例 |
 | tester*.md 提示词库 | 提示词库 | 根目录 `tester.md` / `tester_pro.md` / `tester_new.md` / `tester_analyzer.md` | Markdown 角色提示词 | 用例生成后端代码（运行期经 `BASE_DIR/tester*.md` 读取，且根目录那份会进镜像） | 编辑文案；**运行期真源是根目录 `tester*.md`（已进镜像），`_ext/.../docs/tester*.md` 不进镜像、后端也不读，仅为本地/上游镜像，清理时以根目录为准** | 根目录与 `_ext` 为双源，但仅根目录那份生效 |
 | ai-case-generation-module | git 子仓 | `_ext/ai-case-generation-module/` | git 仓（apps/ + frontend/ + docs/） | 需求分析/用例生成功能 | `cd _ext/ai-case-generation-module && git pull`（浅克隆，必要时 `git fetch --unshallow`） | “AI 用例生成模块”源码 |
 | skills-dist | 分发包 | `skills-dist/` | zip 包 + README | 分发到其他仓库 | 由 `skill-creator/scripts/package_skill.py` 从 `.codebuddy/skills/` 重新生成 | 仅 3 个 Appium skill 的打包版 |
@@ -296,7 +312,7 @@ TestHub 是**公共测试平台**：设备插在任意一台局域网电脑上�
 
 - **统一入口**：所有“标准 Agent Skill”放 `.codebuddy/skills/<name>/SKILL.md`；应用内能力放 `apps/<app>/<name>/`（文件夹式）；需要跨仓分发再打包进 `skills-dist/`。
 - **改完必打包**：修改 `.codebuddy/skills/` 下任一 Appium skill 后，必须重新执行 `package_skill.py` 更新 `skills-dist/`，否则分发的是旧版。Windows 下先 `set PYTHONIOENCODING=utf-8` 避免 emoji 编码报错。
-- **改完必重建对应环境**：`modao_skill/` 与根目录 `tester*.md` 属于进镜像的应用代码，任何改动必须对该环境执行 `docker-compose build backend && docker rm -f testhub-backend && docker-compose up -d backend` 后才生效；dev/prod 各自独立，未重建部署的环境不受影响。`.codebuddy/skills/`、`_ext/`、`skills-dist/` 不进镜像，改了无需重建。
+- **改完必重建对应环境**：`modao_skill/` 与根目录 `tester*.md` 属于进镜像的应用代码，任何改动必须对该环境执行 `.\scripts\deploy_prod.ps1 -BackendOnly` 后才生效（镜像重建+替换，约 30 秒；dev 环境加 `-ComposeFile docker-compose.dev.yml -ComposeProject testhub-dev -BackendContainer testhub-dev-backend-1`）；dev/prod 各自独立，未重建部署的环境不受影响。`.codebuddy/skills/`、`_ext/`、`skills-dist/` 不进镜像，改了无需重建。
 - **App 自动化主线唯一**：仓库标准 App 自动化 = `.codebuddy/skills/` 下的 `appium-android-*`（capture → run-pytest → allure-report，基于 `appium_workspace/` + pytest + Allure）。`mobile-app-autotest`（`_ext/`）为通用参考技能、非默认，仅当用户明确要求 iOS / 云真机 / Java / TypeScript 等多语言工程时启用；其 `description` 已收窄触发词，不会与主线抢请求。
 - **提示词单源（以根目录为准）**：运行期真源为根目录 `tester*.md`（进镜像、后端经 `BASE_DIR/tester*.md` 读取）；`_ext/ai-case-generation-module/docs/tester*.md` 不进镜像、后端不读，仅本地/上游镜像，已加注释标注、不作为维护真源。改提示词只改根目录，禁止双源并行维护。
 - **新增 / 删除 / 迁移**：先在 CODEBUDDY.md 本表登记或更新，再落地文件，保证注册表与磁盘一致。

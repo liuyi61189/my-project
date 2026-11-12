@@ -1,0 +1,102 @@
+name: Deploy Production
+
+# 轻量自建部署：本机 GitHub Actions self-hosted runner 收到 main 分支 push 后，
+# 按改动类型执行最小代价的部署（后端重建镜像约 30 秒，前端镜像内部自己 npm build）。
+# 详细动作见 scripts/deploy_prod.ps1。
+#
+# 前置条件（一次性）：
+#   1. 在 GitHub 仓库 Settings -> Actions -> Runners 新建 self-hosted runner（Windows），
+#      注册时额外给一个自定义标签 testhub-prod（下方 runs-on 依赖它）。
+#   2. 该 runner 以服务方式常驻（runner 目录下 ./svc.sh install && ./svc.sh start 的 Windows 等价：
+#      .\config.cmd 时选择 "run as service"），否则机器重启后不会自动上线。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: '部署范围（auto=按改动自动判断；hotpatch=后端 docker cp 热更新）'
+        type: choice
+        default: auto
+        options: [auto, backend, frontend, all, hotpatch]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # testhub-prod 是自定义标签：确保只有这台能访问 Docker 生产的机器接手任务
+    runs-on: [self-hosted, Windows, X64, testhub-prod]
+    timeout-minutes: 90
+    env:
+      # 生产编排目录（docker-compose.yml + .env）。runner 的 checkout 目录与它不同，
+      # 不显式指定会让 docker compose 用错编排文件、建出第二套容器/卷。
+      TESTHUB_COMPOSE_DIR: C:\TestHub
+
+    steps:
+      - name: 跳过标记检查
+        id: skip
+        shell: pwsh
+        run: |
+          $msg = "${{ github.event.head_commit.message }}"
+          if ($msg -match '\[skip deploy\]') {
+            Write-Host "提交信息包含 [skip deploy]，跳过部署"
+            "skip=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "skip=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Checkout
+        if: steps.skip.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 计算本次改动文件
+        if: steps.skip.outputs.skip != 'true'
+        id: diff
+        shell: pwsh
+        run: |
+          $before = "${{ github.event.before }}"
+          $after = "${{ github.sha }}"
+          $files = @()
+          if ($before -and $before -notmatch '^0{40}$') {
+            $files = @(git diff --name-only $before $after)
+          }
+          if (-not $files -or $files.Count -eq 0) {
+            # 新分支/首次推送：回退成该提交自身的文件清单
+            $files = @(git show --name-only --pretty=format: $after)
+          }
+          $files = @($files | Where-Object { $_ -and $_.Trim() -ne '' })
+          Set-Content -Path changed.txt -Value ($files -join "`n") -Encoding utf8
+          Write-Host "改动文件（$($files.Count) 个）："
+          $files | ForEach-Object { Write-Host "  $_" }
+
+      - name: 执行部署
+        if: steps.skip.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $scope = "${{ github.event.inputs.scope }}"
+          if ([string]::IsNullOrWhiteSpace($scope)) { $scope = 'auto' }
+          Write-Host "部署范围：$scope"
+          switch ($scope) {
+            'backend'  { pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/deploy_prod.ps1 -BackendOnly }
+            'frontend' { pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/deploy_prod.ps1 -FrontendOnly }
+            'all'      { pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/deploy_prod.ps1 -All }
+            'hotpatch' { pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/deploy_prod.ps1 -BackendOnly -HotPatch }
+            default    { pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/deploy_prod.ps1 -ChangedFilesFile changed.txt }
+          }
+          if ($LASTEXITCODE -ne 0) { throw "部署脚本失败，退出码 $LASTEXITCODE" }
+
+      - name: 产出现状摘要
+        if: always() && steps.skip.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          Write-Host "==== 生产容器状态 ===="
+          docker ps --format '{{.Names}} | {{.Status}} | {{.Image}}'
+          Write-Host "==== 后端最近日志 ===="
+          docker logs --tail 20 testhub-backend 2>&1
+          Write-Host "==== 前端最近日志 ===="
+          docker logs --tail 10 testhub-frontend 2>&1
